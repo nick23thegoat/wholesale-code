@@ -1,0 +1,4 @@
+# Generated analysis output lands here.
+*.csv
+*.txt
+!.gitignore

@@ -1,0 +1,15 @@
+# The V1 engine runs on the Python standard library alone (Python 3.9+).
+# There is nothing to install to analyze deals:
+#
+#     python -m wholesale_engine.main --sample
+#
+# Optional development tooling:
+pytest>=7.0          # nicer test runner; `python -m unittest` works without it
+# mypy>=1.0          # static type checking
+# ruff>=0.1          # linting / formatting
+#
+# Reserved for V2 integrations (property data, comps, county records, CRM).
+# Deliberately NOT installed yet — V1 has no external data access by design.
+# requests>=2.31
+# pydantic>=2.0
+# gspread>=6.0
