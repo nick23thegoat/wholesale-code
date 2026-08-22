@@ -1,0 +1,13 @@
+lead_id,comp_address,sale_price,sale_status,sale_date,beds,baths,sqft,year_built,distance_miles,property_type,condition,notes
+LH-009,921 Pecan Street,296000,closed,2026-07-14,3,2,1630,1957,0.1,single family,cosmetic,FICTIONAL TEST DATA. Same block.
+LH-009,4412 Norhill Avenue,281000,closed,2026-06-05,3,2,1550,1953,0.4,single family,cosmetic,FICTIONAL TEST DATA. Adjacent street.
+LH-009,708 Woodland Row,308000,closed,2026-07-28,3,2,1690,1958,0.6,single family,turnkey,FICTIONAL TEST DATA. Renovated comparable.
+LH-011,81 Sabal Palm Way,264000,closed,2026-07-06,3,2,1530,1960,0.1,single family,cosmetic,FICTIONAL TEST DATA. Same street.
+LH-011,214 Coquina Drive,255000,closed,2026-06-18,3,2,1480,1962,0.5,single family,cosmetic,FICTIONAL TEST DATA. Same subdivision.
+LH-011,3390 Marsh Wren Court,274000,closed,2026-07-25,3,2,1590,1959,0.7,single family,cosmetic,FICTIONAL TEST DATA. Slightly larger.
+LH-012,4520 Live Oak Circle,167000,closed,2026-06-30,3,1,1230,1966,0.1,single family,moderate,FICTIONAL TEST DATA. Same circle.
+LH-012,1188 Alamo Heights Row,160000,closed,2026-05-22,3,1,1180,1963,0.4,single family,moderate,FICTIONAL TEST DATA. Nearby.
+LH-012,905 Terrell Place,176000,closed,2026-07-19,3,2,1300,1968,0.8,single family,cosmetic,FICTIONAL TEST DATA. Extra bath.
+LH-021,151 Cedar Hollow Lane,188000,closed,2026-07-11,3,2,1360,1954,0.1,single family,cosmetic,FICTIONAL TEST DATA. Same street.
+LH-021,2204 Sunnyslope Drive,182000,closed,2026-06-09,3,2,1320,1950,0.5,single family,cosmetic,FICTIONAL TEST DATA. Comparable age.
+LH-021,470 Ridgecrest Court,196000,closed,2026-08-01,3,2,1420,1956,0.7,single family,cosmetic,FICTIONAL TEST DATA. Slightly larger.

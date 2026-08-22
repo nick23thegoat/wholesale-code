@@ -39,6 +39,7 @@ class SearchCriteria:
 
     city: Optional[str] = None
     state: Optional[str] = None
+    states: tuple = ()  # multi-state searches (Wave 2 target markets)
     county: Optional[str] = None
     zip_codes: tuple = ()
     max_price: Optional[float] = None

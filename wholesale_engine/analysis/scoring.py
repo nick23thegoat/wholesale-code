@@ -188,10 +188,13 @@ def _score_marketability(lead: PropertyLead, config: EngineConfig) -> ScoreCompo
         PropertyType.SINGLE_FAMILY: 1.00,
         PropertyType.TOWNHOUSE: 0.85,
         PropertyType.DUPLEX: 0.80,
+        PropertyType.TRIPLEX: 0.72,
+        PropertyType.FOURPLEX: 0.70,
         PropertyType.MULTI_FAMILY: 0.70,
         PropertyType.CONDO: 0.60,
         PropertyType.MOBILE: 0.25,
         PropertyType.LAND: 0.30,
+        PropertyType.COMMERCIAL: 0.35,
         PropertyType.UNKNOWN: 0.50,
     }[lead.property_type]
     parts = [f"Type: {lead.property_type}."]

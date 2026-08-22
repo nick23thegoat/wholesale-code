@@ -9,7 +9,7 @@ lead through two rule sets without touching the logic.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Mapping, Tuple
+from typing import Dict, Mapping, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Core deal formula
@@ -179,3 +179,122 @@ IMPORTANT_FIELDS: Tuple[str, ...] = (
     "estimated_monthly_rent",
     "lot_size_sqft",
 )
+
+
+# ===========================================================================
+# Wave 2 — lead hunter configuration
+# ===========================================================================
+#
+# Kept separate from :class:`EngineConfig` on purpose. The LEAD score answers
+# "is this worth calling?" and the DEAL score answers "is this worth buying?".
+# They must never be conflated: a HOT lead can still be a terrible deal.
+
+#: Markets the lead hunter targets out of the box.
+DEFAULT_TARGET_STATES: Tuple[str, ...] = ("FL", "TX", "MO")
+
+#: Markets pre-listed for easy expansion. Add them to ``target_states`` (or
+#: pass --states on the CLI) when you are ready; nothing else needs to change.
+EXPANSION_STATES: Tuple[str, ...] = (
+    "AL", "LA", "TN", "GA", "MS", "AR", "SC", "NC", "KY", "OK",
+)
+
+#: Property types the hunter pursues. Commercial and land are deliberately
+#: absent — they do not fit the ARV/rehab model this engine underwrites with.
+DEFAULT_PROPERTY_TYPES: Tuple[str, ...] = (
+    "single_family", "duplex", "triplex", "fourplex",
+)
+
+#: Distress/opportunity signals the hunter recognises, in report order.
+LEAD_SIGNALS: Tuple[str, ...] = (
+    "absentee_owner",
+    "vacant",
+    "high_equity",
+    "pre_foreclosure",
+    "foreclosure",
+    "tax_delinquent",
+    "probate",
+    "inherited",
+    "code_violation",
+    "tired_landlord",
+)
+
+
+@dataclass(frozen=True)
+class LeadHunterConfig:
+    """Targeting, scoring and filtering rules for the lead hunter."""
+
+    # --- targeting --------------------------------------------------------
+    target_states: Tuple[str, ...] = DEFAULT_TARGET_STATES
+    preferred_property_types: Tuple[str, ...] = DEFAULT_PROPERTY_TYPES
+
+    # --- lead score -------------------------------------------------------
+    signal_points: Dict[str, float] = field(
+        default_factory=lambda: {
+            "absentee_owner": 10.0,
+            "vacant": 10.0,
+            "high_equity": 15.0,
+            "pre_foreclosure": 15.0,
+            "foreclosure": 15.0,
+            "tax_delinquent": 10.0,
+            "probate": 10.0,
+            "inherited": 10.0,
+            "code_violation": 10.0,
+            "tired_landlord": 10.0,
+            "significant_repairs": 10.0,
+        }
+    )
+
+    #: Signals describing the same underlying event score once, at the highest
+    #: value in the group — pre-foreclosure and foreclosure are one situation,
+    #: not two, and probate and inherited usually are as well.
+    exclusive_signal_groups: Tuple[Tuple[str, ...], ...] = (
+        ("foreclosure", "pre_foreclosure"),
+        ("probate", "inherited"),
+    )
+
+    #: Motivation only earns points when motivation information was actually
+    #: supplied. UNKNOWN is worth nothing — silence is not motivation.
+    motivation_points: Dict[str, float] = field(
+        default_factory=lambda: {"high": 15.0, "moderate": 7.0, "low": 0.0}
+    )
+
+    #: A rehab at or above this figure counts as the "significant repairs" signal.
+    significant_repair_threshold: float = 25_000.0
+    #: Conditions that count as significant repairs even without a dollar figure.
+    significant_repair_conditions: Tuple[str, ...] = ("heavy", "teardown")
+    #: Derived equity at or above this share of estimated value reads as high equity.
+    high_equity_ratio: float = 0.35
+
+    max_lead_score: float = 100.0
+    classification_bands: Dict[str, float] = field(
+        default_factory=lambda: {"HOT": 90.0, "STRONG": 75.0, "POSSIBLE": 60.0, "WEAK": 40.0}
+    )
+    #: Classifications that qualify a lead for hot_leads.csv.
+    hot_lead_classifications: Tuple[str, ...] = ("HOT", "STRONG")
+
+    # --- filters ----------------------------------------------------------
+    # A missing value never rejects a lead on its own. Unknowns are recorded
+    # as NEEDS VERIFICATION so you can go find the answer instead of losing
+    # the lead to a blank cell.
+    min_lead_score: float = 0.0
+    min_deal_score: float = 0.0
+    max_asking_price: Optional[float] = None
+    min_equity: Optional[float] = None
+    #: Empty means "no occupancy filter"; e.g. ("vacant",) to hunt vacants only.
+    allowed_occupancy: Tuple[str, ...] = ()
+    #: Empty means "no signal required"; e.g. ("probate", "vacant") for any-of.
+    required_signals: Tuple[str, ...] = ()
+    min_signal_count: int = 0
+
+    def signal_value(self, signal: str) -> float:
+        return self.signal_points.get(signal, 0.0)
+
+    def targets_state(self, state: str) -> bool:
+        return state.strip().upper() in {s.upper() for s in self.target_states}
+
+    def targets_property_type(self, property_type: str) -> bool:
+        return property_type.strip().lower() in {t.lower() for t in self.preferred_property_types}
+
+
+#: Shared default instance. Use ``dataclasses.replace`` for per-run overrides.
+DEFAULT_LEAD_CONFIG = LeadHunterConfig()

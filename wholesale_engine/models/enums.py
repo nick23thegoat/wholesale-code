@@ -97,9 +97,12 @@ class PropertyType(_ParsableEnum):
     TOWNHOUSE = "townhouse"
     CONDO = "condo"
     DUPLEX = "duplex"
+    TRIPLEX = "triplex"
+    FOURPLEX = "fourplex"
     MULTI_FAMILY = "multi_family"
     MOBILE = "mobile"
     LAND = "land"
+    COMMERCIAL = "commercial"
     UNKNOWN = "unknown"
 
     @classmethod
@@ -112,11 +115,17 @@ class PropertyType(_ParsableEnum):
             "town": cls.TOWNHOUSE,
             "condo": cls.CONDO,
             "duplex": cls.DUPLEX,
-            "triplex": cls.MULTI_FAMILY,
-            "fourplex": cls.MULTI_FAMILY,
-            "quad": cls.MULTI_FAMILY,
+            "triplex": cls.TRIPLEX,
+            "3 plex": cls.TRIPLEX,
+            "fourplex": cls.FOURPLEX,
+            "4 plex": cls.FOURPLEX,
+            "quad": cls.FOURPLEX,
             "multi": cls.MULTI_FAMILY,
             "apartment": cls.MULTI_FAMILY,
+            "commercial": cls.COMMERCIAL,
+            "retail": cls.COMMERCIAL,
+            "office": cls.COMMERCIAL,
+            "warehouse": cls.COMMERCIAL,
             "mobile": cls.MOBILE,
             "manufactured": cls.MOBILE,
             "trailer": cls.MOBILE,
