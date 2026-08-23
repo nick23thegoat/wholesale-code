@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .analysis import analyze_property
+from .budget import ApiBudget, UsageReport
 from .config import (
     DEFAULT_CONFIG,
     DEFAULT_LEAD_CONFIG,
@@ -92,13 +93,31 @@ class HuntBudget:
     #: Maximum properties sent for detail/distress enrichment.
     research_limit: int = 100
     #: Maximum properties sent for comps. The dearest call, so the tightest cap.
-    comps_limit: int = 30
+    comps_limit: int = 25
+    #: Ceiling on total billable calls to the property-data vendor for this
+    #: run, sitting over research_limit and comps_limit. The adapter enforces
+    #: it too, so a provider cannot be talked past this by a longer candidate
+    #: list.
+    reach_limit: int = 100
     #: Lead score a property must reach before it is worth paying to research.
     research_min_lead_score: float = 50.0
     #: Lead score a property must reach before it is worth paying for comps.
     comps_min_lead_score: float = 60.0
-    #: Skip tracing is never performed. Present so the cap exists when it is.
+    #: Skip tracing is never performed in the hunt. Present so the cap exists,
+    #: and so the run can report it alongside the caps it did apply.
     skip_trace_limit: int = 0
+
+    @classmethod
+    def from_api_budget(cls, budget: "ApiBudget") -> "HuntBudget":
+        """The env-configured :class:`ApiBudget`, in the funnel's own shape."""
+        return cls(
+            research_limit=budget.max_research,
+            comps_limit=budget.max_comps,
+            reach_limit=budget.max_reach,
+            research_min_lead_score=budget.research_min_lead_score,
+            comps_min_lead_score=budget.comps_min_lead_score,
+            skip_trace_limit=budget.max_skip_traces,
+        )
 
 
 @dataclass
@@ -119,6 +138,8 @@ class HuntResult:
     notices: List[str] = field(default_factory=list)
     provider_name: str = ""
     criteria: Optional[HuntCriteria] = None
+    #: What this run spent, and whether a cap ended it early.
+    usage: UsageReport = field(default_factory=UsageReport)
 
     def change_for(self, lead: Lead) -> Optional[ChangeSet]:
         return self.changes.get(dedupe_key(lead))
@@ -367,6 +388,9 @@ def run_hunt(
         entry for entry in scored
         if entry.score.total >= budget.research_min_lead_score
     ]
+    result.usage.record_cap(
+        "research", max(len(research_pool) - budget.research_limit, 0)
+    )
     researched = research_properties(
         provider, [e.lead for e in research_pool], budget, metrics
     )
@@ -388,6 +412,7 @@ def run_hunt(
         if id(entry.lead) in researched_ids
         and entry.score.total >= budget.comps_min_lead_score
     ]
+    result.usage.record_cap("comps", max(len(comp_pool) - budget.comps_limit, 0))
     fetch_comps(provider, comp_pool, budget, metrics)
     metrics.record_stage(STAGE_COMPED, min(len(comp_pool), budget.comps_limit))
 
@@ -448,6 +473,16 @@ def run_hunt(
     metrics.record_stage(
         STAGE_HOT, sum(1 for r in report.results if r.is_hot_lead and r.status == STATUS_ANALYZED)
     )
+
+    # --- 12. what the run spent -------------------------------------------
+    result.usage.raw_leads = len(raw)
+    result.usage.filtered_out = len(report.results) - len(scored)
+    result.usage.research_calls = metrics.detail_calls + metrics.distress_calls
+    result.usage.comp_calls = metrics.comp_calls
+    result.usage.errors = metrics.errors
+    result.usage.error_messages = list(metrics.error_messages)
+    result.usage.provider_name = provider.name
+    result.usage.adopt_provider_usage(provider)
     return result
 
 

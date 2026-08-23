@@ -229,6 +229,26 @@ DEFAULT_PROPERTY_TYPES: Tuple[str, ...] = (
     "single_family", "duplex", "triplex", "fourplex",
 )
 
+# ---------------------------------------------------------------------------
+# Search price range — a BUYER-CAPACITY ceiling, not a deal rule
+# ---------------------------------------------------------------------------
+#
+# These bound what the engine will *look at*, nothing more. A property inside
+# the range is not thereby a good deal: it still has to clear the ARV, repair,
+# 70% rule, end-buyer ceiling, MAO and deal-score gates like everything else.
+#
+# The ceiling is set by what the buyer network can actually close, so there is
+# deliberately **no low ceiling** here — a $1.4M house with a real spread is a
+# lead, and a $60k house with no spread is not.
+
+#: Lowest asking price to search. Zero means "no floor".
+MIN_PROPERTY_PRICE: float = 0.0
+
+#: Highest asking price to search — roughly what the buyer network can purchase.
+#: Override per run with --max-price.
+MAX_PROPERTY_PRICE: float = 2_200_000.0
+
+
 #: Distress/opportunity signals the hunter recognises, in report order.
 LEAD_SIGNALS: Tuple[str, ...] = (
     "absentee_owner",

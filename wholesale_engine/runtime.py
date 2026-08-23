@@ -190,7 +190,7 @@ class RuntimeConfig:
         """
         missing: List[str] = []
         if self.data_provider not in LOCAL_PROVIDERS:
-            missing.extend(self.settings.missing_for_property_data())
+            missing.extend(self._data_provider_requirements())
         if self.slot("COMPS_PROVIDER") not in LOCAL_PROVIDERS and not self.settings.has_comps:
             missing.append("COMPS_API_KEY")
         if (
@@ -204,6 +204,21 @@ class RuntimeConfig:
             if name not in seen:
                 seen.append(name)
         return seen
+
+    def _data_provider_requirements(self) -> List[str]:
+        """What the configured data adapter says it needs, and does not have.
+
+        Asked of the registry rather than assumed, so each adapter names its
+        own variables — PropertyReach needs PROPERTYREACH_API_KEY, not the
+        generic pair. An adapter that is not registered falls back to the
+        generic property-data credentials.
+        """
+        from .providers.registry import registration
+
+        entry = registration(self.data_provider)
+        if entry is None:
+            return self.settings.missing_for_property_data()
+        return entry.missing_settings(self.settings)
 
     def blocking_problems(self) -> List[str]:
         """Everything that must be fixed before a LIVE run may start."""

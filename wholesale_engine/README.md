@@ -78,7 +78,9 @@ wholesale_engine/
 │   ├── http_client.py          timeouts, retries, backoff, credential redaction
 │   ├── csv_provider.py         local CSV provider (works with no credentials)
 │   ├── http_provider.py        real-vendor template — inert until one is chosen
-│   ├── registry.py             --source selection; no paid vendor pre-selected
+│   ├── registry.py             --source selection; a registered vendor is not a connected one
+│   ├── propertyreach.py        PropertyReach adapter — transport, mapping, budget
+│   ├── propertyreach_schema.py PropertyReach wire format: confirmed vs outstanding
 │   └── metrics.py              provider call counting and the funnel report
 ├── research/                   WAVE 4
 │   ├── facts.py                Fact: a value + its source + its confidence
@@ -939,6 +941,22 @@ python3 -m wholesale_engine.main --hunt --leads my_list.csv \
 Signal flags are **any-of**, and an unknown value never rejects a lead — it
 becomes a gap to go and fill.
 
+### Search price range
+
+`MIN_PROPERTY_PRICE` (default `0`) and `MAX_PROPERTY_PRICE` (default
+`2,200,000`) bound what the engine will *look at*. Override per run with
+`--min-price` / `--max-price`.
+
+The ceiling is set by what the buyer network can actually close, so there is
+deliberately **no low ceiling**. A $1.4M house with a real spread is a lead; a
+$60k house with no spread is not.
+
+It is a search bound, **not a deal rule**. A property inside the range still
+has to clear ARV, the repair estimate, the 70% rule, the end-buyer ceiling,
+MAO, the $18,000 target fee and the deal score like everything else — and the
+ranking is by profitability, risk and deal quality, never by purchase price. An
+unknown price never rejects a lead.
+
 ### Providers
 
 A provider answers up to five questions. Only the first is required.
@@ -955,23 +973,63 @@ Anything a provider does not support returns a `ProviderResponse` with
 `supported=False` and a reason. That is a clear answer, not an error and never
 a guess — the field stays blank and is reported as missing data.
 
-Two providers ship:
+Three providers ship:
 
 | `--source` | Status |
 | --- | --- |
 | `csv` | ready. Local files, no credentials, no network, no cost. |
+| `propertyreach` | registered. Needs `PROPERTYREACH_API_KEY`; three endpoint paths still unverified — see below. |
 | `http-template` | inert. A finished transport with no vendor wired to it. |
 
-**No paid vendor is pre-selected**, deliberately. Choosing one means reading
-that vendor's official API documentation, terms and pricing first. With no
-credentials configured the engine says so and runs in CSV/test mode; it never
-fabricates a live result.
+**No vendor is pre-selected**, deliberately, and a registered adapter is not a
+connected one. With no credentials configured the engine says so and runs in
+CSV/test mode; it never fabricates a live result.
+
+### PropertyReach
+
+The first real property-data vendor wired in.
+
+```bash
+python3 -m wholesale_engine.main --mode TEST --source propertyreach \
+    --states FL,TX,MO --min-price 0 --max-price 2200000
+```
+
+**Confirmed** from PropertyReach's published documentation, and implemented:
+
+| | |
+| --- | --- |
+| base URL | `https://api.propertyreach.com/v1` (override with `PROPERTYREACH_BASE_URL`) |
+| authentication | an `x-api-key` request header — not Bearer |
+| transport | REST, JSON |
+| skip trace | `POST /v1/skip-trace` |
+| rate limits | per plan; the client imposes its own 1 req/sec floor regardless |
+
+**Not confirmed**: the REST paths for Property Search, Property Detail and
+Comparables, their request parameter names, and the response field names.
+
+The adapter therefore **refuses to call an unverified endpoint against the live
+API**. It will not guess a path from a naming convention and fire a request at
+PropertyReach's servers. Everything else — transport, retries, error handling,
+budget accounting, and the mapping onto `Lead`, `Property` and `Comp` — is
+finished and tested against mocked responses.
+
+To finish it, open <https://docs.propertyreach.com> and fill in
+`providers/propertyreach_schema.py`: the `path` and `method` for each endpoint,
+the request parameter names, the response keys, then flip `verified=True`.
+Nothing else in the engine changes. `--provider-status` prints exactly what is
+still outstanding.
+
+A response field the mapping does not match stays **unknown** — never zero,
+never a blank standing in for an answer — so an unfinished mapping degrades
+safely instead of producing wrong numbers.
 
 ### Credentials
 
 Copy `.env.example` to `.env` (git-ignored) and fill it in:
 
 ```
+PROPERTYREACH_API_KEY=          # the only variable LIVE PropertyReach needs
+PROPERTYREACH_BASE_URL=         # optional; defaults to the published API root
 PROPERTY_DATA_API_KEY=
 PROPERTY_DATA_BASE_URL=
 PUBLIC_RECORDS_API_KEY=
@@ -1017,11 +1075,14 @@ and every stage narrows what the next one sees:
   lead scoring       free   (Wave 2 rules)
 100 leads
   property research  BILLABLE — capped by --research-limit (default 100)
-30 candidates
-  comps / valuation  BILLABLE — capped by --comps-limit (default 30)
+25 candidates
+  comps / valuation  BILLABLE — capped by --comps-limit (default 25)
 10 hot deals
-  skip tracing       NOT CONNECTED
+  skip tracing       capped by MAX_SKIP_TRACES (default 10), gated and confirmed
 ```
+
+Over the whole of that, `MAX_REACH` (default 100) caps total calls to the
+property-data vendor for the run.
 
 Comps are never requested for a raw lead, and nothing is ever skip traced.
 Both are enforced in `hunt.py` and asserted by the tests. Every run prints
@@ -1499,23 +1560,27 @@ python3 -m wholesale_engine.main --provider-status
 ```
 
 ```
-CAPABILITY          csv               http-template
-PROPERTY SEARCH     YES               YES
-PROPERTY DETAILS    no                no
-OWNER DATA          no                no
-EQUITY              no                no
-DISTRESS            no                no
-FORECLOSURE         no                no
-TAX DATA            no                no
-COMPS               YES               no
-VALUATION           no                no
+CAPABILITY          csv               http-template     propertyreach
+PROPERTY SEARCH     YES               YES               YES
+PROPERTY DETAILS    no                no                YES
+OWNER DATA          no                no                YES
+EQUITY              no                no                YES
+DISTRESS            no                no                YES
+FORECLOSURE         no                no                YES
+TAX DATA            no                no                YES
+COMPS               YES               no                YES
+VALUATION           no                no                YES
 ```
+
+A capability being declared means the vendor documents offering it, not that
+the endpoint is callable today — `--provider-status` prints which PropertyReach
+paths are still unverified.
 
 Asking for an unsupported capability returns a clear "not supported", never an
 empty list that reads like "none found".
 
-**Adding a vendor.** No paid provider ships registered — that decision needs
-its documentation, terms and pricing. When you have one:
+**Adding another vendor.** Adding one means reading its documentation, terms
+and pricing first. When you have:
 
 ```python
 from wholesale_engine.providers import Capability, HttpPropertyDataProvider, register
@@ -1560,11 +1625,18 @@ python3 -m wholesale_engine.main --budget-status
 ```
 MAX_RAW_LEADS       1000
 MAX_RESEARCH        100   (lead score >= 50)
-MAX_COMPS           30    (lead score >= 60)
+MAX_REACH           100   (total provider calls per run)
+MAX_COMPS           25    (lead score >= 60)
 MAX_SKIP_TRACES     10    (lead score >= 70 OR deal score >= 70 OR priority >= 75,
                            and the property is not PASSED, DEAD or CLOSED)
 Bulk skip tracing   asks first
 ```
+
+`MAX_REACH` is the vendor-level ceiling sitting over the per-stage caps: a run
+cannot spend more than that on the property-data API however it splits the
+budget between research and comps. The adapter enforces it itself, so a longer
+candidate list cannot talk the provider past it. Every run reports calls used,
+calls remaining, and whether a cap ended it early.
 
 Set them in `.env` or per run with `--max-research`, `--max-comps`,
 `--max-skip-traces`. **Nothing expensive runs on a rejected lead** — a lead

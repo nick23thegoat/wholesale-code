@@ -29,6 +29,8 @@ from wholesale_engine.config import (  # noqa: E402
     DEFAULT_LEAD_CONFIG,
     EngineConfig,
     LeadHunterConfig,
+    MAX_PROPERTY_PRICE,
+    MIN_PROPERTY_PRICE,
 )
 from wholesale_engine.data.csv_loader import (  # noqa: E402
     LoadReport,
@@ -92,6 +94,8 @@ from wholesale_engine.providers import (  # noqa: E402
     describe_sources,
     get_provider,
     health_report,
+    propertyreach_schema_status,
+    registration,
 )
 from wholesale_engine.reports.hunt_report import (  # noqa: E402
     render_hunt_summary,
@@ -246,8 +250,16 @@ def build_parser() -> argparse.ArgumentParser:
     hunt.add_argument("--counties", help="comma-separated counties to search")
     hunt.add_argument("--cities", help="comma-separated cities to search")
     hunt.add_argument("--zip-codes", help="comma-separated ZIP codes to search")
-    hunt.add_argument("--min-price", type=float, default=None, help="lowest asking price to consider")
-    hunt.add_argument("--max-price", type=float, default=None, help="highest asking price to consider")
+    hunt.add_argument(
+        "--min-price", type=float, default=None,
+        help=f"lowest asking price to search (default: ${MIN_PROPERTY_PRICE:,.0f})",
+    )
+    hunt.add_argument(
+        "--max-price", type=float, default=None,
+        help=f"highest asking price to search (default: ${MAX_PROPERTY_PRICE:,.0f} — "
+             "what the buyer network can close, NOT a claim that everything "
+             "under it is a deal)",
+    )
     for signal, helptext in (
         ("vacant", "reported vacant"),
         ("absentee", "absentee owner"),
@@ -665,6 +677,19 @@ SIGNAL_FLAGS = {
 }
 
 
+def _first_set(*values: Optional[float]) -> Optional[float]:
+    """The first value that was actually given. Used to resolve the price band.
+
+    ``--min-price``/``--max-price`` win, then the older ``--max-asking-price``,
+    then the configured search range. The range is a BUYER-CAPACITY ceiling,
+    not a deal rule — everything inside it is still underwritten normally.
+    """
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
 def criteria_from_args(
     args: argparse.Namespace, lead_config: LeadHunterConfig
 ) -> HuntCriteria:
@@ -678,8 +703,10 @@ def criteria_from_args(
         cities=_split(args.cities) or (),
         zip_codes=_split(args.zip_codes) or (),
         property_types=_split(args.property_types) or lead_config.preferred_property_types,
-        min_price=args.min_price,
-        max_price=args.max_price if args.max_price is not None else args.max_asking_price,
+        min_price=_first_set(args.min_price, MIN_PROPERTY_PRICE),
+        max_price=_first_set(
+            args.max_price, getattr(args, "max_asking_price", None), MAX_PROPERTY_PRICE
+        ),
         min_equity=args.min_equity,
         required_signals=signals,
         min_lead_score=args.min_lead_score or 0.0,
@@ -694,13 +721,20 @@ def run_hunt_cli(args: argparse.Namespace, engine_config: EngineConfig) -> int:
 
     settings = ProviderSettings.from_env()
     requested = (args.source or "csv").strip().lower()
-    if requested != "csv" and not settings.has_property_data:
+
+    # Each adapter declares the variables it needs, so the fallback message
+    # names the right ones instead of a generic pair. An unknown name falls
+    # through to get_provider, which lists what is registered.
+    entry = registration(requested)
+    missing = entry.missing_settings(settings) if entry else []
+    if entry is not None and missing:
         print(NO_PROVIDER_MESSAGE, file=sys.stderr)
-        missing = ", ".join(settings.missing_for_property_data())
         print(
-            f"  '{requested}' needs {missing}. Copy .env.example to .env and fill it in.",
+            f"  '{requested}' needs {', '.join(missing)}. "
+            "Copy .env.example to .env and fill it in.",
             file=sys.stderr,
         )
+        print("  Falling back to the local CSV source for this run.", file=sys.stderr)
         requested = "csv"
 
     # Resolved after the fallback, so an unconfigured live source lands on a
@@ -723,7 +757,7 @@ def run_hunt_cli(args: argparse.Namespace, engine_config: EngineConfig) -> int:
         print(f"{exc}", file=sys.stderr)
         return 2
 
-    budget = HuntBudget()
+    budget = HuntBudget.from_api_budget(ApiBudget.from_env())
     if args.research_limit is not None:
         budget.research_limit = args.research_limit
     if args.comps_limit is not None:
@@ -1575,6 +1609,10 @@ def run_status_cli(args: argparse.Namespace, runtime: RuntimeConfig) -> int:
     printed = False
     if args.provider_status:
         print(capability_matrix(runtime.settings))
+        print()
+        # What is confirmed about the one real vendor wired in, and what still
+        # needs its documentation read. Printed so the gap is never a surprise.
+        print(propertyreach_schema_status())
         print()
         print(skip_trace_status())
         printed = True

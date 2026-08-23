@@ -31,6 +31,7 @@ from wholesale_engine.providers import (
     get_provider,
     provider_info,
     registered_names,
+    registration,
 )
 from wholesale_engine.settings import NO_PROVIDER_MESSAGE, ProviderSettings
 from wholesale_engine.storage import LeadStore
@@ -201,8 +202,21 @@ class RegistryTests(unittest.TestCase):
         self.assertIn("csv", registered_names())
 
     def test_no_paid_vendor_is_pre_selected(self):
+        """A vendor may be registered; none may be selected or usable by default.
+
+        PropertyReach ships registered as of the PropertyReach wave, but a
+        registered adapter is inert until its credentials are set, and the
+        default source is still the local CSV file.
+        """
         for name in registered_names():
-            self.assertIn(name, ("csv", "http-template"))
+            entry = registration(name)
+            if name == "csv":
+                continue
+            self.assertTrue(
+                entry.required_settings,
+                f"{name} must require credentials before it can be constructed",
+            )
+        self.assertEqual(get_provider("csv", csv_path=SAMPLE_LEADS).name, "csv")
 
     def test_an_unknown_source_is_refused_not_guessed(self):
         with self.assertRaises(ProviderNotConfigured) as ctx:

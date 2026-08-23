@@ -5,12 +5,14 @@ The application never mentions a vendor — it asks the registry for whatever
 ``DATA_PROVIDER`` names, and works with whatever capabilities that adapter
 declares.
 
-**No paid vendor ships registered.** Choosing one means reading that vendor's
-official API documentation, terms and pricing, and writing an adapter against
-it. Two entries exist out of the box:
+Three entries ship:
 
-``csv``            local files, no credentials, no cost — the TEST-mode default
-``http-template``  a finished transport with no vendor behind it
+``csv``             local files, no credentials, no cost — the TEST-mode default
+``propertyreach``   the PropertyReach adapter; needs ``PROPERTYREACH_API_KEY``
+``http-template``   a finished transport with no vendor behind it
+
+No vendor is *selected* for you: ``DATA_PROVIDER`` / ``--source`` decides, and
+an adapter with no credentials reports NOT CONNECTED rather than pretending.
 
 Adding a real one:
 
@@ -42,6 +44,9 @@ from .base import Capability, PropertyDataProvider, ProviderInfo, ProviderNotCon
 from .csv_provider import CsvProvider
 from .http_provider import HttpPropertyDataProvider
 from .metrics import ProviderMetrics
+from .propertyreach import PropertyReachProvider
+from .propertyreach import build as _propertyreach_factory
+from .propertyreach_schema import API_KEY_VAR as PROPERTYREACH_API_KEY_VAR
 
 #: factory(settings, csv_path, comps_path, metrics) -> PropertyDataProvider
 Factory = Callable[..., PropertyDataProvider]
@@ -162,6 +167,12 @@ register(
     capabilities=(Capability.SEARCH, Capability.COMPS),
     is_local=True,
     documentation="Local files only — no vendor API involved.",
+)
+register(
+    "propertyreach", _propertyreach_factory, PropertyReachProvider.description,
+    capabilities=PropertyReachProvider.capabilities,
+    required_settings=(PROPERTYREACH_API_KEY_VAR,),
+    documentation=PropertyReachProvider.documentation_note,
 )
 register(
     "http-template", _http_template_factory, HttpPropertyDataProvider.description,

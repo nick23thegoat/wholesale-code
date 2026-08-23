@@ -29,6 +29,11 @@ ENV_VARS = (
     "MAX_RESEARCH",
     "MAX_COMPS",
     "MAX_SKIP_TRACES",
+    "MAX_REACH",
+    "MIN_PROPERTY_PRICE",
+    "MAX_PROPERTY_PRICE",
+    "PROPERTYREACH_API_KEY",
+    "PROPERTYREACH_BASE_URL",
     "PROPERTY_DATA_API_KEY",
     "PROPERTY_DATA_BASE_URL",
     "PUBLIC_RECORDS_API_KEY",
@@ -90,6 +95,10 @@ class ProviderSettings:
 
     property_data_api_key: Optional[str] = None
     property_data_base_url: Optional[str] = None
+    #: PropertyReach. The base URL is optional — the adapter falls back to the
+    #: vendor's published root when it is not set. The key never has a default.
+    propertyreach_api_key: Optional[str] = None
+    propertyreach_base_url: Optional[str] = None
     public_records_api_key: Optional[str] = None
     comps_api_key: Optional[str] = None
     skip_trace_api_key: Optional[str] = None
@@ -101,6 +110,8 @@ class ProviderSettings:
         return cls(
             property_data_api_key=env("PROPERTY_DATA_API_KEY"),
             property_data_base_url=env("PROPERTY_DATA_BASE_URL"),
+            propertyreach_api_key=env("PROPERTYREACH_API_KEY"),
+            propertyreach_base_url=env("PROPERTYREACH_BASE_URL"),
             public_records_api_key=env("PUBLIC_RECORDS_API_KEY"),
             comps_api_key=env("COMPS_API_KEY"),
             skip_trace_api_key=env("SKIP_TRACE_API_KEY"),
@@ -112,6 +123,11 @@ class ProviderSettings:
     def has_property_data(self) -> bool:
         """A live property search needs BOTH a key and an endpoint."""
         return bool(self.property_data_api_key and self.property_data_base_url)
+
+    @property
+    def has_propertyreach(self) -> bool:
+        """PropertyReach needs only a key — its base URL has a published default."""
+        return bool(self.propertyreach_api_key)
 
     @property
     def has_comps(self) -> bool:
@@ -140,6 +156,7 @@ class ProviderSettings:
             name
             for name, present in (
                 ("property-data", self.has_property_data),
+                ("propertyreach", self.has_propertyreach),
                 ("public-records", self.has_public_records),
                 ("comps", self.has_comps),
                 ("skip-trace", self.has_skip_trace),

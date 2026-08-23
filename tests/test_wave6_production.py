@@ -74,6 +74,8 @@ from wholesale_engine.providers import (
     redact_headers,
     redact_payload,
     registered_names,
+    ProviderNotConfigured,
+    get_provider,
     registration,
     supports,
 )
@@ -106,6 +108,7 @@ def clean_env(**overrides):
     values.update({
         "WHOLESALE_MODE": "", "PROPERTY_DATA_API_KEY": "", "PROPERTY_DATA_BASE_URL": "",
         "COMPS_API_KEY": "", "SKIP_TRACE_API_KEY": "", "SKIP_TRACE_BASE_URL": "",
+        "PROPERTYREACH_API_KEY": "", "PROPERTYREACH_BASE_URL": "",
     })
     values.update(overrides)
     return mock.patch.dict(os.environ, values, clear=False)
@@ -160,12 +163,27 @@ class RegistryTests(unittest.TestCase):
             self.assertFalse(response.supported)
             self.assertIn("nothing has been invented", response.reason)
 
-    def test_no_paid_vendor_ships_registered(self):
-        self.assertEqual(set(registered_names()), {"csv", "http-template"})
+    def test_every_registered_vendor_is_inert_without_credentials(self):
+        """A registered vendor is not a connected one.
+
+        PropertyReach ships registered. What must stay true is that any adapter
+        reaching the network declares the variables it needs and refuses to be
+        constructed without them, so nothing is ever silently live.
+        """
+        for name in registered_names():
+            entry = registration(name)
+            if entry.is_local:
+                continue
+            self.assertTrue(entry.required_settings, f"{name} declares no credentials")
+            with clean_env():
+                self.assertFalse(entry.is_configured(ProviderSettings()))
+                with self.assertRaises(ProviderNotConfigured):
+                    get_provider(name, ProviderSettings())
 
     def test_providers_can_be_found_by_capability(self):
         self.assertIn("csv", providers_for(Capability.COMPS))
-        self.assertEqual(providers_for(Capability.OWNER), [])
+        self.assertNotIn("csv", providers_for(Capability.OWNER))
+        self.assertIn("propertyreach", providers_for(Capability.OWNER))
 
     def test_a_registration_reports_what_it_needs(self):
         entry = registration("http-template")

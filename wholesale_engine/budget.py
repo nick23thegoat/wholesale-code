@@ -30,6 +30,7 @@ BUDGET_ENV_VARS = (
     "MAX_RESEARCH",
     "MAX_COMPS",
     "MAX_SKIP_TRACES",
+    "MAX_REACH",
 )
 
 
@@ -53,8 +54,12 @@ class ApiBudget:
     max_raw_leads: int = 1_000
     #: Properties sent for detail / owner / distress enrichment.
     max_research: int = 100
+    #: Total billable calls one property-data vendor may be sent in a run.
+    #: This is the vendor-level ceiling that sits over max_research and
+    #: max_comps: a run cannot spend more than this however it splits them.
+    max_reach: int = 100
     #: Properties sent for comps. The dearest property call, so the tightest cap.
-    max_comps: int = 30
+    max_comps: int = 25
     #: Owners sent for skip tracing. The dearest call in the whole pipeline.
     max_skip_traces: int = 10
 
@@ -83,6 +88,7 @@ class ApiBudget:
         budget = cls(
             max_raw_leads=_env_int("MAX_RAW_LEADS", cls.max_raw_leads),
             max_research=_env_int("MAX_RESEARCH", cls.max_research),
+            max_reach=_env_int("MAX_REACH", cls.max_reach),
             max_comps=_env_int("MAX_COMPS", cls.max_comps),
             max_skip_traces=_env_int("MAX_SKIP_TRACES", cls.max_skip_traces),
         )
@@ -143,6 +149,8 @@ class ApiBudget:
             f"  MAX_RAW_LEADS       {self.max_raw_leads}",
             f"  MAX_RESEARCH        {self.max_research}"
             f"   (lead score >= {self.research_min_lead_score:g})",
+            f"  MAX_REACH           {self.max_reach}"
+            f"   (total provider calls per run)",
             f"  MAX_COMPS           {self.max_comps}"
             f"   (lead score >= {self.comps_min_lead_score:g})",
             f"  MAX_SKIP_TRACES     {self.max_skip_traces}"
@@ -164,6 +172,32 @@ class UsageReport:
     error_messages: List[str] = field(default_factory=list)
     skipped_for_budget: Dict[str, int] = field(default_factory=dict)
 
+    #: Provider-level call accounting, filled in from the adapter's own usage
+    #: counter when the source keeps one (PropertyReach does). ``None`` means
+    #: the source does not bill per call — a CSV run, for instance.
+    provider_name: str = ""
+    provider_calls_used: Optional[int] = None
+    provider_calls_limit: Optional[int] = None
+    #: True when a cap — not the data — ended the run early.
+    stopped_by_budget: bool = False
+
+    def adopt_provider_usage(self, provider: object) -> None:
+        """Copy an adapter's call counter in, if it keeps one."""
+        usage = getattr(provider, "usage", None)
+        if usage is None or not hasattr(usage, "used"):
+            return
+        self.provider_name = getattr(provider, "name", "") or self.provider_name
+        self.provider_calls_used = usage.used
+        self.provider_calls_limit = getattr(usage, "limit", None)
+        if getattr(usage, "stopped_by_budget", False):
+            self.stopped_by_budget = True
+
+    @property
+    def provider_calls_remaining(self) -> Optional[int]:
+        if self.provider_calls_used is None or self.provider_calls_limit is None:
+            return None
+        return max(self.provider_calls_limit - self.provider_calls_used, 0)
+
     def record_error(self, message: str) -> None:
         self.errors += 1
         if message not in self.error_messages:
@@ -172,6 +206,7 @@ class UsageReport:
     def record_cap(self, stage: str, count: int) -> None:
         if count > 0:
             self.skipped_for_budget[stage] = self.skipped_for_budget.get(stage, 0) + count
+            self.stopped_by_budget = True
 
     @property
     def billable_calls(self) -> int:
@@ -186,6 +221,10 @@ class UsageReport:
             "skip_trace_calls": self.skip_trace_calls,
             "errors": self.errors,
             "billable_calls": self.billable_calls,
+            "provider": self.provider_name,
+            "provider_calls_used": self.provider_calls_used,
+            "provider_calls_remaining": self.provider_calls_remaining,
+            "stopped_by_budget": self.stopped_by_budget,
         }
 
     def render(self, budget: Optional[ApiBudget] = None) -> str:
@@ -199,6 +238,17 @@ class UsageReport:
             f"  ERRORS              {self.errors}",
             f"  BILLABLE TOTAL      {self.billable_calls}",
         ]
+        if self.provider_calls_used is not None:
+            label = (self.provider_name or "provider").upper()
+            head = [f"  {label} — provider call budget"]
+            head.append(f"    calls used        {self.provider_calls_used}")
+            remaining = self.provider_calls_remaining
+            if remaining is not None:
+                head.append(
+                    f"    calls remaining   {remaining}"
+                    f"   (MAX_REACH={self.provider_calls_limit})"
+                )
+            lines[1:1] = head
         if budget is not None:
             estimated = (
                 budget.estimate("research", self.research_calls)
@@ -212,6 +262,15 @@ class UsageReport:
                     "  ESTIMATED COST      unknown — set the per-call rates in "
                     "ApiBudget from your provider's published pricing."
                 )
+        lines.append(
+            f"  BUDGET STOPPED RUN  {'YES' if self.stopped_by_budget else 'no'}"
+        )
+        if budget is not None:
+            lines.append(
+                f"  LIMITS              research {budget.max_research}, "
+                f"comps {budget.max_comps}, skip traces {budget.max_skip_traces}, "
+                f"provider calls {budget.max_reach}"
+            )
         for stage, count in self.skipped_for_budget.items():
             lines.append(f"  capped: {count} lead(s) not sent for {stage}")
         for message in self.error_messages:

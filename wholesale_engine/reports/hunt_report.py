@@ -16,6 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+from ..budget import ApiBudget
 from ..formatting import money
 from ..lead_hunter.models import STATUS_ANALYZED, LeadResult
 from ..models.enums import Decision
@@ -290,5 +291,9 @@ def render_hunt_summary(hunt_result, limit: Optional[int] = None) -> str:
         lines.append("-" * WIDTH)
 
     lines.append(hunt_result.metrics.render())
+    usage = getattr(hunt_result, "usage", None)
+    if usage is not None:
+        lines.append("")
+        lines.append(usage.render(ApiBudget.from_env()))
     lines.append("=" * WIDTH)
     return "\n".join(lines)

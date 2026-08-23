@@ -32,6 +32,18 @@ from .http_client import (
     redact_headers,
     redact_payload,
 )
+from .propertyreach import (
+    PropertyReachProvider,
+    ReachUsage,
+    to_comp,
+    to_lead,
+)
+from .propertyreach_schema import (
+    DEFAULT_BASE_URL as PROPERTYREACH_BASE_URL,
+    ENDPOINTS as PROPERTYREACH_ENDPOINTS,
+    schema_status as propertyreach_schema_status,
+    unverified_endpoints as propertyreach_unverified_endpoints,
+)
 from .registry import (
     Registration,
     capability_matrix,
@@ -66,7 +78,15 @@ __all__ = [
     "CsvProvider",
     "HttpPropertyDataProvider",
     "HuntCriteria",
+    "PROPERTYREACH_BASE_URL",
+    "PROPERTYREACH_ENDPOINTS",
     "PropertyDataProvider",
+    "PropertyReachProvider",
+    "ReachUsage",
+    "propertyreach_schema_status",
+    "propertyreach_unverified_endpoints",
+    "to_comp",
+    "to_lead",
     "ProviderError",
     "ProviderInfo",
     "ProviderMetrics",
