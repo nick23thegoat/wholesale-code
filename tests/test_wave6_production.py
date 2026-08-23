@@ -575,6 +575,54 @@ class ContactStoreTests(unittest.TestCase):
             self.store.methods_for(self.row.dedupe_key)[0].status, MethodStatus.VERIFIED
         )
 
+    def test_saving_a_contact_also_writes_its_methods(self):
+        # Regression: skip tracing wrote a contact but no contact_method row,
+        # so a later DO_NOT_CONTACT suppressed nothing.
+        from wholesale_engine.acquisitions import Contact
+
+        self.store.save_contact(
+            Contact(
+                property_id=self.row.dedupe_key, phone="8135550100",
+                email="owner@example.invalid", mailing_address="900 Elsewhere Ave",
+                source="skip-trace",
+            )
+        )
+        kinds = {m.kind for m in self.store.methods_for(self.row.dedupe_key)}
+        self.assertEqual(kinds, {MethodKind.PHONE, MethodKind.EMAIL, MethodKind.ADDRESS})
+
+    def test_a_skip_traced_number_reaches_the_suppression_list(self):
+        from wholesale_engine.acquisitions import Contact
+
+        self.store.save_contact(
+            Contact(property_id=self.row.dedupe_key, phone="8135550100",
+                    source="skip-trace")
+        )
+        self.store.record_seller_response(self.row.dedupe_key, "DO_NOT_CONTACT")
+        self.assertIn("8135550100", self.store.suppressed_values())
+
+    def test_saving_a_contact_twice_does_not_duplicate_its_methods(self):
+        from wholesale_engine.acquisitions import Contact
+
+        for _ in range(3):
+            self.store.save_contact(
+                Contact(property_id=self.row.dedupe_key, phone="8135550100",
+                        source="skip-trace")
+            )
+        phones = self.store.methods_for(self.row.dedupe_key, MethodKind.PHONE)
+        self.assertEqual(len(phones), 1)
+
+    def test_a_wrong_number_response_marks_the_phone_wrong(self):
+        from wholesale_engine.acquisitions import Contact
+
+        self.store.save_contact(
+            Contact(property_id=self.row.dedupe_key, phone="8135550100",
+                    source="skip-trace")
+        )
+        self.store.record_seller_response(self.row.dedupe_key, "WRONG_NUMBER")
+        phone = self.store.methods_for(self.row.dedupe_key, MethodKind.PHONE)[0]
+        self.assertIs(phone.status, MethodStatus.WRONG)
+        self.assertIn("8135550100", self.store.suppressed_values())
+
     def test_marking_do_not_contact_adds_to_the_suppression_list(self):
         saved = self.store.save_method(self.method()).method
         self.store.set_method_status(saved.method_id, MethodStatus.DO_NOT_CONTACT)

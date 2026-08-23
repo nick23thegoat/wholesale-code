@@ -272,7 +272,14 @@ class AcquisitionStore:
         )
 
     def save_contact(self, contact: Contact) -> Contact:
-        """Insert or update a contact, keyed on property plus source."""
+        """Insert or update a contact, keyed on property plus source.
+
+        The phone and email are also written as :class:`ContactMethod` rows.
+        That is what puts them on the suppression list, so a later
+        DO_NOT_CONTACT actually suppresses them — every producer of contacts
+        (skip trace, manual entry, import) goes through here, so none of them
+        can skip that step.
+        """
         now = self._now()
         with closing(self.connection.cursor()) as cur:
             cur.execute(
@@ -321,7 +328,37 @@ class AcquisitionStore:
                     values + (contact.contact_id,),
                 )
         self.connection.commit()
+        self._sync_methods(contact)
         return contact
+
+    def _sync_methods(self, contact: Contact) -> None:
+        """Mirror a contact's phone and email into the contact_methods table.
+
+        Merging, so this is idempotent and never overwrites a verified record
+        with a weaker one.
+        """
+        from .contact_methods import ContactMethod
+
+        for method in (
+            ContactMethod.phone(
+                contact.phone, contact.source or "manual", contact.phone_confidence,
+                contact.phone_type, property_id=contact.property_id,
+                contact_id=contact.contact_id, is_test_data=contact.is_test_data,
+                source_date=contact.source_date,
+            ),
+            ContactMethod.email(
+                contact.email, contact.source or "manual", contact.email_confidence,
+                property_id=contact.property_id, contact_id=contact.contact_id,
+                is_test_data=contact.is_test_data, source_date=contact.source_date,
+            ),
+            ContactMethod.address(
+                contact.mailing_address, contact.source or "manual",
+                property_id=contact.property_id, contact_id=contact.contact_id,
+                is_test_data=contact.is_test_data,
+            ),
+        ):
+            if method is not None:
+                self.save_method(method)
 
     def contacts_for(self, property_id: str) -> List[Contact]:
         rows = self.connection.execute(
@@ -546,6 +583,13 @@ class AcquisitionStore:
                 self.set_method_status(
                     method.method_id, MethodStatus.DO_NOT_CONTACT,
                     "seller asked not to be contacted",
+                )
+        elif value is SellerResponse.WRONG_NUMBER:
+            from .contact_methods import MethodKind, MethodStatus
+
+            for method in self.methods_for(property_id, MethodKind.PHONE):
+                self.set_method_status(
+                    method.method_id, MethodStatus.WRONG, "reached the wrong person"
                 )
         return str(value)
 
