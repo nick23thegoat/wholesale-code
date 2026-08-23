@@ -45,7 +45,7 @@ class MAOTests(unittest.TestCase):
         )
 
     def test_fee_and_percentage_together(self):
-        config = EngineConfig(arv_percentage=0.65, wholesale_fee=10_000)
+        config = EngineConfig(arv_percentage=0.65, target_wholesale_fee=10_000)
         self.assertEqual(fin.maximum_allowable_offer(400_000, 50_000, config), 200_000)
 
     def test_repairs_reduce_mao_dollar_for_dollar(self):

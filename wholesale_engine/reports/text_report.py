@@ -123,7 +123,16 @@ def render_result(result: AnalysisResult, config: EngineConfig = DEFAULT_CONFIG)
     lines.append(
         _kv(f"{config.arv_percentage * 100:.0f}% of ARV:", money(fin.seventy_percent_arv))
     )
-    lines.append(_kv("Wholesale Fee:", money(config.wholesale_fee)))
+    lines.append(_kv("Target Wholesale Fee:", money(config.target_wholesale_fee)))
+    lines.append(_kv("End-Buyer Ceiling:", money(fin.end_buyer_max_price)))
+    lines.append(
+        _wrap(
+            "The most a cash end buyer can pay under the same rule "
+            f"({config.arv_percentage * 100:.0f}% of ARV less repairs). MAO is this ceiling "
+            "less your target fee.",
+            indent="      ",
+        )
+    )
     lines.append(_kv("MAO:", money(fin.mao)))
     lines.append(
         _kv(
@@ -144,7 +153,50 @@ def render_result(result: AnalysisResult, config: EngineConfig = DEFAULT_CONFIG)
             )
         )
     lines.append(_kv("Potential Assignment Price:", money(fin.assignment_price)))
-    lines.append(_kv("Potential Gross Spread:", money(fin.potential_gross_spread)))
+    lines.append(
+        _kv("Deal Cushion (MAO - Offer):", money(fin.potential_gross_spread))
+    )
+    lines.append(
+        _wrap(
+            "Cushion is room ON TOP of the target fee, which MAO already reserved. It is "
+            "not the fee — read the fee on the next line.",
+            indent="      ",
+        )
+    )
+
+    lines.append("")
+    lines.append("  WHOLESALE FEE")
+    lines.append(_kv("Target Wholesale Fee:", money(config.target_wholesale_fee), indent="    ", label_width=28))
+    lines.append(
+        _kv("Potential Wholesale Fee:", money(fin.binding_wholesale_fee), indent="    ", label_width=28)
+    )
+    lines.append(
+        _kv("Wholesale Fee Status:", str(fin.wholesale_fee_status), indent="    ", label_width=28)
+    )
+    if fin.potential_wholesale_fee is not None:
+        lines.append(
+            _kv(
+                "  at recommended offer:",
+                money(fin.potential_wholesale_fee),
+                indent="    ",
+                label_width=28,
+            )
+        )
+    if fin.wholesale_fee_at_asking is not None:
+        lines.append(
+            _kv("  at asking price:", money(fin.wholesale_fee_at_asking), indent="    ", label_width=28)
+        )
+    if fin.buyer_margin is not None:
+        lines.append(_kv("Buyer Margin at Assignment:", money(fin.buyer_margin), indent="    ", label_width=28))
+    lines.append(
+        _wrap(
+            "The fee is judged at the price actually on the table: the asking price when "
+            "the seller is asking more than you plan to offer, otherwise the recommended "
+            "offer. An offer the seller has not accepted cannot qualify a deal.",
+            indent="      ",
+        )
+    )
+    lines.append("")
     if fin.spread_vs_asking is not None:
         lines.append(_kv("MAO vs Asking:", money(fin.spread_vs_asking)))
     if fin.discount_from_arv_pct is not None:

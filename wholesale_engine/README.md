@@ -76,7 +76,7 @@ wholesale_engine/
     ├── csv_report.py           the Wave 1 flat CSV export
     ├── lead_report.py          lead_pipeline.csv + hot_leads.csv
     └── output/                 generated files land here
-tests/                          200 unit + end-to-end tests
+tests/                          236 unit + end-to-end tests
 ```
 
 The layering is strict, and it is the reason V2 integrations will be easy:
@@ -324,11 +324,19 @@ FINANCIALS
   Repair Estimate (used):    $42,000  [USER-PROVIDED (not a contractor quote)]
     Low / Mid / High:        $42,000 / $48,300 / $56,700
   70% of ARV:                $150,500
-  Wholesale Fee:             $18,000
+  Target Wholesale Fee:      $18,000
+  End-Buyer Ceiling:         $150,500
   MAO:                       $90,500
   Recommended Offer:         $82,000  (7% below MAO)
   Potential Assignment Price:$100,000
-  Potential Gross Spread:    $8,500
+  Deal Cushion (MAO - Offer):$8,500
+
+  WHOLESALE FEE
+    Target Wholesale Fee:       $18,000
+    Potential Wholesale Fee:    $26,500
+    Wholesale Fee Status:       MEETS TARGET
+      at recommended offer:     $26,500
+      at asking price:          $26,500
 
   MAO BY REHAB SCENARIO
     Low rehab   repairs    $42,000  ->  MAO    $90,500   (vs asking: $8,500)
@@ -390,17 +398,17 @@ ADDRESS                           SCORE  CLASS       DECISION                 OF
 ====================================================================================================
 LEAD PIPELINE — 25 row(s) read from csv:sample_leads.csv, 23 unique properties
 ====================================================================================================
-ADDRESS                       ST    LEAD CLASS        DEAL DECISION                 OFFER     SPREAD
-----------------------------------------------------------------------------------------------------
-77 Sabal Palm Way             FL    80.0 🟠 STRONG     83.5 🔥 GO                  $109,000    $13,500
-145 Cedar Hollow Lane         MO    90.0 🔥 HOT        79.0 🟠 NEGOTIATE            $59,500     $7,500
-905 Pecan Street              TX    95.0 🔥 HOT        78.6 🟠 NEGOTIATE           $118,000    $14,800
-4501 Live Oak Circle          TX    52.0 🔵 WEAK       76.0 🟠 NEGOTIATE            $66,500     $5,100
-412 Magnolia Lane             MO    70.0 🟡 POSSIBLE   72.4 🟡 NEED MORE DATA       $69,500    $21,000
-66 Camellia Court             FL    90.0 🔥 HOT        62.6 🟡 NEED MORE DATA       $33,000    $12,400
+ADDRESS                     ST    LEAD CLASS        DEAL DECISION                OFFER       FEE  FEE STATUS
+--------------------------------------------------------------------------------------------------------
+77 Sabal Palm Way           FL    80.0 🟠 STRONG     83.5 🔥 GO                 $109,000   $21,500  MEETS TARGET
+145 Cedar Hollow Lane       MO    90.0 🔥 HOT        79.0 🟠 NEGOTIATE           $59,500   $14,000  BELOW TARGET
+905 Pecan Street            TX    95.0 🔥 HOT        78.6 🟠 NEGOTIATE          $118,000    $2,800  BELOW TARGET
+4501 Live Oak Circle        TX    52.0 🔵 WEAK       76.0 🟠 NEGOTIATE           $66,500   -$2,400  BELOW TARGET
+412 Magnolia Lane           MO    70.0 🟡 POSSIBLE   72.4 🟡 NEED MORE DATA      $69,500   $26,500  MEETS TARGET
+66 Camellia Court           FL    90.0 🔥 HOT        62.6 🟡 NEED MORE DATA      $33,000    $5,400  BELOW TARGET
 ...
-2210 Beechwood Avenue         OH    95.0 🔥 HOT         —   filtered out                 —          —
-17 Sycamore Road              OH     0.0 ❌ PASS        —   filtered out                 —          —
+2210 Beechwood Avenue       OH    95.0 🔥 HOT         —   filtered out                —         —
+17 Sycamore Road            OH     0.0 ❌ PASS        —   filtered out                —         —
 ----------------------------------------------------------------------------------------------------
 16 analyzed · 7 filtered out · 2 duplicate row(s) merged · 5 hot/strong lead(s)
 LEAD score = worth a call. DEAL score = worth a contract. They are not the same test,
@@ -418,6 +426,9 @@ keeping the two scores apart:
   all, because Ohio is outside the target markets.
 * **66 Camellia Court** is a 🔥 HOT lead (90) whose deal comes back at 62.6 and
   NEED MORE DATA. Hot to call, not yet a deal.
+* **905 Pecan Street** scores 78.6 and still is not a GO: at the asking price
+  the assignment fee is only $2,800 against an $18,000 target. Only one lead in
+  the sample clears the fee bar at the price the seller is actually asking.
 
 Two files are written:
 
@@ -429,8 +440,8 @@ deal side rather than a misleading zero):
 lead_id,property_id,address,city,state,county,zip_code,owner_name,asking_price,
 estimated_value,estimated_repairs,lead_score,lead_classification,deal_score,
 deal_classification,mao,recommended_offer,potential_assignment_price,
-potential_spread,final_decision,lead_source,arv_confidence,comp_confidence,
-risk_flags,missing_data
+potential_spread,target_wholesale_fee,potential_wholesale_fee,wholesale_fee_status,
+final_decision,lead_source,arv_confidence,comp_confidence,risk_flags,missing_data
   + pipeline_status, lead_signals, unconfirmed_signals, filter_reasons,
     needs_verification, arv_status, seventy_percent_arv, wholesale_fee,
     estimated_equity, equity_is_derived, merged_duplicates, property_type,
@@ -551,12 +562,61 @@ reach GO or NEGOTIATE.
 ### The formula
 
 ```
-MAO = (ARV × 70%) − Repairs − $18,000 wholesale fee
+End-Buyer Ceiling        = ARV × 70% − Repairs        (the most a cash buyer can pay)
+MAO                      = End-Buyer Ceiling − Target Wholesale Fee
+                         = (ARV × 70%) − Repairs − $18,000
 
 Recommended Offer        = MAO − risk haircut, capped at the asking price
-Potential Gross Spread   = MAO − Recommended Offer
-Potential Assignment     = Recommended Offer + $18,000
+Potential Assignment     = Recommended Offer + Target Wholesale Fee
+Potential Wholesale Fee  = End-Buyer Ceiling − purchase price
+Buyer Margin             = End-Buyer Ceiling − Potential Assignment Price
+Deal Cushion             = MAO − Recommended Offer
 ```
+
+**Cushion is not the fee.** MAO already reserves the target fee, so the cushion
+is money *on top of* it. Buy at MAO and the fee is exactly $18,000; buy $13,500
+below MAO and the fee is $31,500, not $13,500. The report labels the line
+`Deal Cushion (MAO - Offer)` for exactly this reason.
+
+### Wholesale fee status
+
+Every deal reports three lines:
+
+```
+Target Wholesale Fee:       $18,000
+Potential Wholesale Fee:    $21,500
+Wholesale Fee Status:       MEETS TARGET
+  at recommended offer:     $31,500
+  at asking price:          $21,500
+```
+
+The status is judged **at the price actually on the table** — the asking price
+when the seller wants more than you plan to offer, otherwise the recommended
+offer. An offer the seller has not accepted cannot be what qualifies a deal,
+so a lead needing a $30,000 concession is never scored as if it were already
+agreed.
+
+| Status | Meaning |
+| --- | --- |
+| `MEETS TARGET` | the deal supports the target fee at the binding price |
+| `BELOW TARGET` | it does not — raises the `BELOW TARGET WHOLESALE FEE` risk flag |
+| `UNKNOWN` | no ARV, no repair basis, or no price to measure against |
+
+**A 🔥 GO requires MEETS TARGET.** Everything else being perfect is not enough:
+if the fee is not there at the price on offer, the answer is 🟠 NEGOTIATE (or
+❌ PASS when the gap is too wide), never GO.
+
+Both numbers stay configurable in `config.py`:
+
+```python
+ARV_PERCENTAGE: float = 0.70
+TARGET_WHOLESALE_FEE: float = 18_000.0
+```
+
+or per run: `--arv-pct 65 --fee 25000`. To demand cushion *on top of* the fee
+before a deal counts as MEETS TARGET, set
+`EngineConfig(min_cushion_above_target=18_000)` — that requires $36,000 of
+total room, which is a deliberately stricter bar than a $18,000 minimum fee.
 
 The engine **never recommends paying full MAO**. The haircut is assembled from
 named risks — unverified ARV, thin comps, condition-based rehab estimate,

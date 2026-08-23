@@ -16,6 +16,7 @@ from .enums import (
     Decision,
     RepairConfidence,
     Severity,
+    WholesaleFeeStatus,
 )
 from .property import Comp, PropertyLead
 
@@ -140,19 +141,58 @@ class MAOScenario:
 
 @dataclass
 class FinancialSummary:
+    """The deal economics, with each quantity kept distinct.
+
+    The six numbers that must never be conflated:
+
+    1. ``mao`` — the most you can pay, with the target fee already reserved
+    2. ``recommended_offer`` — what to actually offer (at or below MAO)
+    3. ``target_wholesale_fee`` — the fee you are trying to earn
+    4. ``assignment_price`` — recommended offer + target fee
+    5. ``potential_wholesale_fee`` — the fee the deal actually supports
+    6. ``buyer_margin`` — room left for the end buyer at that assignment price
+
+    ``potential_gross_spread`` (MAO - offer) is a seventh, different thing:
+    cushion on top of the fee, never the fee itself.
+    """
+
     arv: Optional[float] = None
     seventy_percent_arv: Optional[float] = None
     repairs_used: Optional[float] = None
-    wholesale_fee: float = 0.0
+
+    # --- the fee, kept separate from everything else --------------------
+    target_wholesale_fee: float = 0.0
+    #: (ARV x pct) - repairs: the most an end buyer can pay.
+    end_buyer_max_price: Optional[float] = None
+    #: Fee achievable if the seller accepts the recommended offer.
+    potential_wholesale_fee: Optional[float] = None
+    #: Fee achievable if the seller will not move off the asking price.
+    wholesale_fee_at_asking: Optional[float] = None
+    #: The fee the status is judged on — measured at the binding price.
+    binding_wholesale_fee: Optional[float] = None
+    wholesale_fee_status: WholesaleFeeStatus = WholesaleFeeStatus.UNKNOWN
+    #: Room left for the end buyer at the potential assignment price.
+    buyer_margin: Optional[float] = None
+
     mao: Optional[float] = None
     recommended_offer: Optional[float] = None
     offer_discount_pct: float = 0.0
     offer_discount_reasons: List[str] = field(default_factory=list)
     assignment_price: Optional[float] = None
+    #: MAO - recommended offer. Cushion ON TOP of the fee, not the fee.
     potential_gross_spread: Optional[float] = None
     spread_vs_asking: Optional[float] = None
     discount_from_arv_pct: Optional[float] = None
     scenarios: List[MAOScenario] = field(default_factory=list)
+
+    @property
+    def wholesale_fee(self) -> float:
+        """Backwards-compatible alias for :attr:`target_wholesale_fee`."""
+        return self.target_wholesale_fee
+
+    @property
+    def meets_fee_target(self) -> bool:
+        return self.wholesale_fee_status is WholesaleFeeStatus.MEETS_TARGET
 
 
 @dataclass(frozen=True)

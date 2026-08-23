@@ -230,7 +230,7 @@ def run(argv: Optional[List[str]] = None) -> int:
 
     config = EngineConfig(
         arv_percentage=args.arv_pct / 100.0,
-        wholesale_fee=args.fee,
+        target_wholesale_fee=args.fee,
         min_acceptable_spread=args.fee,
     )
 

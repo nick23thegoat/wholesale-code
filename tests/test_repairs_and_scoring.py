@@ -112,7 +112,7 @@ class ScoreTests(unittest.TestCase):
             assignment_price=offer + DEFAULT_CONFIG.wholesale_fee,
             potential_gross_spread=mao - offer,
             spread_vs_asking=None if lead.asking_price is None else mao - lead.asking_price,
-            wholesale_fee=DEFAULT_CONFIG.wholesale_fee,
+            target_wholesale_fee=DEFAULT_CONFIG.target_wholesale_fee,
         )
         return score_deal(lead, comps, arv, repairs, financials)
 

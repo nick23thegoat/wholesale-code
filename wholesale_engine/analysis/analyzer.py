@@ -30,6 +30,7 @@ from ..models.enums import (
     RepairConfidence,
     SellerMotivation,
     Severity,
+    WholesaleFeeStatus,
 )
 from ..models.property import PropertyLead
 from ..models.results import (
@@ -110,7 +111,7 @@ def _build_financials(
     repairs: RepairEstimate,
     config: EngineConfig,
 ) -> FinancialSummary:
-    summary = FinancialSummary(wholesale_fee=config.wholesale_fee)
+    summary = FinancialSummary(target_wholesale_fee=config.target_wholesale_fee)
     if not arv.is_usable:
         return summary
 
@@ -123,6 +124,9 @@ def _build_financials(
         return summary
 
     summary.repairs_used = repairs.base
+    summary.end_buyer_max_price = fin.end_buyer_max_price(
+        arv.arv, repairs.base, config  # type: ignore[arg-type]
+    )
     summary.mao = fin.maximum_allowable_offer(arv.arv, repairs.base, config)  # type: ignore[arg-type]
 
     discount, reasons = fin.offer_risk_discount(
@@ -142,6 +146,30 @@ def _build_financials(
         )
     if lead.asking_price is not None:
         summary.spread_vs_asking = summary.mao - lead.asking_price
+        summary.wholesale_fee_at_asking = fin.potential_wholesale_fee(
+            arv.arv, repairs.base, lead.asking_price, config  # type: ignore[arg-type]
+        )
+
+    # The fee the deal actually supports — distinct from the MAO cushion.
+    if summary.recommended_offer is not None:
+        summary.potential_wholesale_fee = fin.potential_wholesale_fee(
+            arv.arv, repairs.base, summary.recommended_offer, config  # type: ignore[arg-type]
+        )
+        summary.buyer_margin = fin.buyer_margin(
+            arv.arv, repairs.base, summary.assignment_price, config  # type: ignore[arg-type]
+        )
+
+    # Judge the fee at the price actually on the table: an offer the seller has
+    # not accepted cannot be what qualifies a deal.
+    binding_price = fin.binding_purchase_price(summary.recommended_offer, lead.asking_price)
+    if binding_price is not None:
+        summary.binding_wholesale_fee = fin.potential_wholesale_fee(
+            arv.arv, repairs.base, binding_price, config  # type: ignore[arg-type]
+        )
+    summary.wholesale_fee_status = fin.classify_wholesale_fee(
+        summary.binding_wholesale_fee, config
+    )
+
     summary.scenarios = fin.build_mao_scenarios(
         arv.arv,  # type: ignore[arg-type]
         repairs.low,
@@ -229,6 +257,61 @@ def _deal_risk_flags(
                     ),
                 )
             )
+
+    if summary.wholesale_fee_status is WholesaleFeeStatus.BELOW_TARGET:
+        fee = summary.binding_wholesale_fee
+        at_asking = (
+            summary.wholesale_fee_at_asking is not None
+            and lead.asking_price is not None
+            and summary.binding_wholesale_fee == summary.wholesale_fee_at_asking
+        )
+        where = (
+            f"at the asking price of {money(lead.asking_price)}"
+            if at_asking
+            else f"at the recommended offer of {money(summary.recommended_offer)}"
+        )
+        shortfall = config.required_wholesale_fee - (fee or 0.0)
+        flags.append(
+            RiskFlag(
+                Severity.HIGH,
+                "below_target_wholesale_fee",
+                (
+                    f"BELOW TARGET WHOLESALE FEE: this deal supports about {money(fee)} "
+                    f"{where}, against your target of "
+                    f"{money(config.required_wholesale_fee)} — a shortfall of "
+                    f"{money(shortfall)}. The seller has to come down roughly that much "
+                    "before the fee is there."
+                ),
+            )
+        )
+    elif summary.wholesale_fee_status is WholesaleFeeStatus.UNKNOWN and summary.mao is not None:
+        flags.append(
+            RiskFlag(
+                Severity.MEDIUM,
+                "wholesale_fee_unknown",
+                (
+                    "Wholesale fee status is UNKNOWN — without an asking price or a "
+                    "usable offer there is no purchase price to measure the fee against."
+                ),
+            )
+        )
+
+    if (
+        summary.buyer_margin is not None
+        and summary.buyer_margin < 0
+        and summary.assignment_price is not None
+    ):
+        flags.append(
+            RiskFlag(
+                Severity.HIGH,
+                "no_buyer_margin",
+                (
+                    f"At an assignment price of {money(summary.assignment_price)} there is no "
+                    "room left for the end buyer under the same 70% rule. Your fee only "
+                    "exists if someone will actually buy the contract."
+                ),
+            )
+        )
 
     if (
         summary.potential_gross_spread is not None
@@ -594,17 +677,38 @@ def _decide(
 
     gap = summary.mao - asking
 
-    if score.total >= config.go_score_threshold and gap >= 0 and spread_ok:
+    meets_fee_target = summary.wholesale_fee_status is WholesaleFeeStatus.MEETS_TARGET
+
+    if score.total >= config.go_score_threshold and gap >= 0 and spread_ok and meets_fee_target:
         return (
             Decision.GO,
             (
-                f"Go. At ${asking:,.0f} the seller is already asking ${gap:,.0f} below the MAO "
-                f"of ${summary.mao:,.0f}, the ARV basis is {arv.confidence}, and the deal scores "
-                f"{score.total:.0f}/100 ({score.classification}). Open at "
-                f"${summary.recommended_offer:,.0f} — below MAO, to protect against the rehab "
-                f"and value risks listed above — and assign around "
-                f"${summary.assignment_price:,.0f}. Nothing here is guaranteed: verify the "
+                f"Go. At {money(asking)} the seller is already asking {money(gap)} below the MAO "
+                f"of {money(summary.mao)}, the ARV basis is {arv.confidence}, and the deal scores "
+                f"{score.total:.0f}/100 ({score.classification}). The economics clear your "
+                f"target: even if the seller will not move off {money(asking)}, the deal "
+                f"supports about {money(summary.wholesale_fee_at_asking)} of assignment fee "
+                f"against a {money(config.required_wholesale_fee)} target. Open at "
+                f"{money(summary.recommended_offer)} — below MAO, to protect against the rehab "
+                f"and value risks listed above — where the fee would be about "
+                f"{money(summary.potential_wholesale_fee)}, and assign around "
+                f"{money(summary.assignment_price)}. Nothing here is guaranteed: verify the "
                 "rehab with a walkthrough and confirm title before you tie it up."
+            ),
+        )
+
+    if score.total >= config.go_score_threshold and gap >= 0 and spread_ok and not meets_fee_target:
+        # Everything else is in place, but the fee is not. That is a negotiation,
+        # not a green light.
+        return (
+            Decision.NEGOTIATE,
+            (
+                f"Negotiate — the economics do not clear your fee target. The deal scores "
+                f"{score.total:.0f}/100 ({score.classification}), but at "
+                f"{money(summary.binding_wholesale_fee)} the achievable assignment fee is "
+                f"short of your {money(config.required_wholesale_fee)} target. You need the "
+                f"purchase price at or below {money(summary.mao)} for the fee to be there. "
+                "Work the price, or pass."
             ),
         )
 
@@ -633,22 +737,30 @@ def _decide(
             Decision.NEGOTIATE,
             (
                 f"Negotiate. The deal scores {score.total:.0f}/100 ({score.classification}), but "
-                f"asking ${asking:,.0f} sits ${abs(gap):,.0f} above the MAO of "
-                f"${summary.mao:,.0f}. Your opening number is "
-                f"${summary.recommended_offer:,.0f} and ${summary.mao:,.0f} is your walk-away "
-                "ceiling — show the seller the repair math rather than arguing about price. "
-                "If they will not move below MAO, there is no deal here."
+                f"asking {money(asking)} sits {money(abs(gap))} above the MAO of "
+                f"{money(summary.mao)}. At the asking price the assignment fee would be about "
+                f"{money(summary.wholesale_fee_at_asking)} against your "
+                f"{money(config.required_wholesale_fee)} target, so the price has to move "
+                f"before this is a deal. Your opening number is "
+                f"{money(summary.recommended_offer)} and {money(summary.mao)} is your walk-away "
+                "ceiling — show the seller the repair math rather than arguing about price."
             ),
         )
 
+    fee_note = (
+        f"At the binding price the fee comes to about {money(summary.binding_wholesale_fee)} "
+        f"against your {money(config.required_wholesale_fee)} target"
+        + ("." if meets_fee_target else " — short of target, so price is the lever.")
+    )
     return (
         Decision.NEGOTIATE,
         (
-            f"Negotiate. The math works — MAO of ${summary.mao:,.0f} against asking "
-            f"${asking:,.0f} — but at {score.total:.0f}/100 ({score.classification}) the "
-            "supporting picture is not strong enough to move without pushing on price. Open at "
-            f"${summary.recommended_offer:,.0f}, hold ${summary.mao:,.0f} as your ceiling, and "
-            "work the risk flags above before you commit."
+            f"Negotiate. The math works — MAO of {money(summary.mao)} against asking "
+            f"{money(asking)} — but at {score.total:.0f}/100 ({score.classification}) the "
+            "supporting picture is not strong enough to move without pushing on price. "
+            + fee_note
+            + f" Open at {money(summary.recommended_offer)}, hold {money(summary.mao)} as your "
+            "ceiling, and work the risk flags above before you commit."
         ),
     )
 

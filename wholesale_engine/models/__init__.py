@@ -12,6 +12,7 @@ from .enums import (
     SaleStatus,
     SellerMotivation,
     Severity,
+    WholesaleFeeStatus,
 )
 from .property import Comp, PropertyLead
 from .results import (
@@ -51,4 +52,5 @@ __all__ = [
     "ScoreComponent",
     "SellerMotivation",
     "Severity",
+    "WholesaleFeeStatus",
 ]

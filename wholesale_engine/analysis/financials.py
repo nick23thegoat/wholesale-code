@@ -21,20 +21,36 @@ def seventy_percent_arv(arv: float, config: EngineConfig = DEFAULT_CONFIG) -> fl
     return arv * config.arv_percentage
 
 
+def end_buyer_max_price(
+    arv: float, repairs: float, config: EngineConfig = DEFAULT_CONFIG
+) -> float:
+    """(ARV x 70%) - repairs: the most a cash end buyer can pay.
+
+    This is the ceiling your assignment price has to fit under. It is also the
+    reason MAO and the fee are two different things: MAO is this ceiling less
+    the fee you are reserving for yourself.
+    """
+    return seventy_percent_arv(arv, config) - repairs
+
+
 def maximum_allowable_offer(
     arv: float,
     repairs: float,
     config: EngineConfig = DEFAULT_CONFIG,
     wholesale_fee: Optional[float] = None,
 ) -> float:
-    """MAO = (ARV x 70%) - repairs - wholesale fee.
+    """MAO = (ARV x 70%) - repairs - target wholesale fee.
+
+    Equivalently: ``end_buyer_max_price() - target_wholesale_fee``. Buying at
+    exactly MAO yields exactly the target fee and nothing more; buying below it
+    yields the target fee **plus** the cushion.
 
     The result can legitimately be negative: a low ARV against heavy repairs
     means there is no price at which this deal works. Callers must not clamp
     that to zero — a negative MAO is the answer.
     """
-    fee = config.wholesale_fee if wholesale_fee is None else wholesale_fee
-    return seventy_percent_arv(arv, config) - repairs - fee
+    fee = config.target_wholesale_fee if wholesale_fee is None else wholesale_fee
+    return end_buyer_max_price(arv, repairs, config) - fee
 
 
 def assignment_price(
@@ -43,17 +59,75 @@ def assignment_price(
     wholesale_fee: Optional[float] = None,
 ) -> float:
     """What the end buyer would pay: purchase price + the assignment fee."""
-    fee = config.wholesale_fee if wholesale_fee is None else wholesale_fee
+    fee = config.target_wholesale_fee if wholesale_fee is None else wholesale_fee
     return purchase_price + fee
 
 
 def gross_spread(mao: float, purchase_price: float) -> float:
-    """Potential gross spread = MAO - recommended purchase price.
+    """Deal cushion = MAO - recommended purchase price.
 
-    This is the cushion between what the deal can bear and what you offered,
-    on top of the assignment fee already baked into the MAO.
+    **This is not the wholesale fee.** MAO already reserves the target fee, so
+    this is the extra room on top of it. Use :func:`potential_wholesale_fee`
+    for the fee itself.
     """
     return mao - purchase_price
+
+
+def potential_wholesale_fee(
+    arv: float,
+    repairs: float,
+    purchase_price: float,
+    config: EngineConfig = DEFAULT_CONFIG,
+) -> float:
+    """The assignment fee this deal actually supports at ``purchase_price``.
+
+    ``end_buyer_max_price - purchase_price``: what is left between what you pay
+    and the most an end buyer can pay. Buy at MAO and this equals the target
+    fee exactly; buy below MAO and it is the target fee plus the cushion; pay
+    above MAO and it falls below target.
+    """
+    return end_buyer_max_price(arv, repairs, config) - purchase_price
+
+
+def buyer_margin(
+    arv: float, repairs: float, assignment_price: float, config: EngineConfig = DEFAULT_CONFIG
+) -> float:
+    """Room left for the END BUYER at your assignment price.
+
+    Negative means no buyer following the same 70% rule can take the deal at
+    that price, however good your own numbers look.
+    """
+    return end_buyer_max_price(arv, repairs, config) - assignment_price
+
+
+def classify_wholesale_fee(
+    fee: Optional[float], config: EngineConfig = DEFAULT_CONFIG
+) -> "WholesaleFeeStatus":
+    """MEETS TARGET / BELOW TARGET / UNKNOWN for an achievable fee."""
+    from ..models.enums import WholesaleFeeStatus
+
+    if fee is None:
+        return WholesaleFeeStatus.UNKNOWN
+    if fee >= config.required_wholesale_fee:
+        return WholesaleFeeStatus.MEETS_TARGET
+    return WholesaleFeeStatus.BELOW_TARGET
+
+
+def binding_purchase_price(
+    recommended_offer: Optional[float], asking_price: Optional[float]
+) -> Optional[float]:
+    """The price the fee test has to be measured against.
+
+    A recommended offer is a proposal; the asking price is what is actually on
+    the table. When the seller is asking more than you plan to offer, the fee
+    that matters for a GO is the fee at THEIR number — otherwise every deal
+    would qualify on the strength of a discount the seller never agreed to.
+    """
+    if recommended_offer is None:
+        return asking_price
+    if asking_price is None:
+        return recommended_offer
+    return max(recommended_offer, asking_price)
 
 
 def round_offer_down(amount: float, config: EngineConfig = DEFAULT_CONFIG) -> float:

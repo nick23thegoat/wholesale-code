@@ -18,8 +18,12 @@ from typing import Dict, Mapping, Optional, Tuple
 #: MAO = (ARV x ARV_PERCENTAGE) - repairs - wholesale fee
 ARV_PERCENTAGE: float = 0.70
 
-#: Default minimum assignment fee targeted on every deal.
-WHOLESALE_FEE: float = 18_000.0
+#: Default MINIMUM TARGET assignment fee. This is the fee you are trying to
+#: earn on every deal — not a fee the engine assumes you will get.
+TARGET_WHOLESALE_FEE: float = 18_000.0
+
+#: Backwards-compatible alias for the module-level constant.
+WHOLESALE_FEE: float = TARGET_WHOLESALE_FEE
 
 
 # ---------------------------------------------------------------------------
@@ -51,9 +55,16 @@ class EngineConfig:
 
     # --- deal formula -----------------------------------------------------
     arv_percentage: float = ARV_PERCENTAGE
-    wholesale_fee: float = WHOLESALE_FEE
-    #: A spread below this is not worth contracting at the recommended offer.
-    min_acceptable_spread: float = WHOLESALE_FEE
+    #: The fee you are TARGETING. MAO reserves exactly this much for you, so a
+    #: purchase at MAO yields exactly this fee and no more.
+    target_wholesale_fee: float = TARGET_WHOLESALE_FEE
+    #: A deal whose achievable fee falls under this is BELOW TARGET.
+    min_acceptable_spread: float = TARGET_WHOLESALE_FEE
+    #: Extra room demanded ON TOP of the target fee before a deal counts as
+    #: MEETS TARGET. Zero means "the target fee is the bar", which is the
+    #: standard reading. Set it to the target fee itself if you want a deal to
+    #: clear the fee twice over before it can be called a GO.
+    min_cushion_above_target: float = 0.0
 
     # --- offer construction ----------------------------------------------
     #: The engine never recommends paying full MAO; this is the floor haircut.
@@ -143,6 +154,16 @@ class EngineConfig:
     negotiate_score_threshold: float = 40.0
     #: Asking above MAO by more than this fraction is likely not bridgeable.
     max_negotiable_gap: float = 0.40
+
+    @property
+    def wholesale_fee(self) -> float:
+        """Backwards-compatible alias for :attr:`target_wholesale_fee`."""
+        return self.target_wholesale_fee
+
+    @property
+    def required_wholesale_fee(self) -> float:
+        """The fee a deal must actually support to count as MEETS TARGET."""
+        return self.target_wholesale_fee + self.min_cushion_above_target
 
     def weight(self, name: str) -> float:
         return self.score_weights.get(name, 0.0)

@@ -214,6 +214,22 @@ class RepairConfidence(Enum):
         return self.value
 
 
+class WholesaleFeeStatus(Enum):
+    """Whether a deal actually supports the target assignment fee.
+
+    This is a test on the FEE the deal can produce, not on the cushion between
+    MAO and the recommended offer. MAO already reserves the target fee, so
+    cushion is money on top of the fee, not the fee itself.
+    """
+
+    MEETS_TARGET = "MEETS TARGET"
+    BELOW_TARGET = "BELOW TARGET"
+    UNKNOWN = "UNKNOWN"
+
+    def __str__(self) -> str:
+        return self.value
+
+
 class Severity(Enum):
     CRITICAL = "CRITICAL"
     HIGH = "HIGH"

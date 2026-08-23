@@ -32,6 +32,9 @@ LEAD_PIPELINE_COLUMNS: List[str] = [
     "recommended_offer",
     "potential_assignment_price",
     "potential_spread",
+    "target_wholesale_fee",
+    "potential_wholesale_fee",
+    "wholesale_fee_status",
     "final_decision",
     "lead_source",
     "arv_confidence",
@@ -49,7 +52,10 @@ LEAD_DETAIL_COLUMNS: List[str] = [
     "needs_verification",
     "arv_status",
     "seventy_percent_arv",
-    "wholesale_fee",
+    "end_buyer_max_price",
+    "wholesale_fee_at_asking",
+    "wholesale_fee_at_offer",
+    "buyer_margin",
     "estimated_equity",
     "equity_is_derived",
     "merged_duplicates",
@@ -94,6 +100,13 @@ def lead_result_to_row(result: LeadResult, include_detail: bool = False) -> Dict
         "recommended_offer": _round(financials.recommended_offer) if financials else None,
         "potential_assignment_price": _round(financials.assignment_price) if financials else None,
         "potential_spread": _round(financials.potential_gross_spread) if financials else None,
+        "target_wholesale_fee": _round(financials.target_wholesale_fee) if financials else None,
+        "potential_wholesale_fee": (
+            _round(financials.binding_wholesale_fee) if financials else None
+        ),
+        "wholesale_fee_status": (
+            str(financials.wholesale_fee_status) if financials else "UNKNOWN"
+        ),
         "final_decision": None if analysis is None else str(analysis.decision),
         "lead_source": lead.source,
         "arv_confidence": None if analysis is None else str(analysis.arv.confidence),
@@ -124,7 +137,16 @@ def lead_result_to_row(result: LeadResult, include_detail: bool = False) -> Dict
                 "seventy_percent_arv": (
                     _round(financials.seventy_percent_arv) if financials else None
                 ),
-                "wholesale_fee": _round(financials.wholesale_fee) if financials else None,
+                "end_buyer_max_price": (
+                    _round(financials.end_buyer_max_price) if financials else None
+                ),
+                "wholesale_fee_at_asking": (
+                    _round(financials.wholesale_fee_at_asking) if financials else None
+                ),
+                "wholesale_fee_at_offer": (
+                    _round(financials.potential_wholesale_fee) if financials else None
+                ),
+                "buyer_margin": _round(financials.buyer_margin) if financials else None,
                 "estimated_equity": _round(lead.equity_estimate),
                 "equity_is_derived": lead.equity_is_derived,
                 "merged_duplicates": ", ".join(lead.merged_from),
@@ -188,7 +210,15 @@ def write_hot_leads_csv(
 # Console summary
 # ---------------------------------------------------------------------------
 
-WIDTH = 100
+WIDTH = 104
+
+
+def lead_config_target(report: LeadPipelineReport) -> float:
+    """The target fee these results were underwritten with."""
+    for result in report.results:
+        if result.analysis is not None:
+            return result.analysis.financials.target_wholesale_fee
+    return 0.0
 
 
 def render_lead_summary(
@@ -202,28 +232,30 @@ def render_lead_summary(
         f"LEAD PIPELINE — {report.rows_read} row(s) read from {report.source_name or 'source'}, "
         f"{len(report.results)} unique propert{'y' if len(report.results) == 1 else 'ies'}",
         "=" * WIDTH,
-        f"{'ADDRESS':<30}{'ST':<4}{'LEAD':>6} {'CLASS':<11}{'DEAL':>6} "
-        f"{'DECISION':<18}{'OFFER':>12}{'SPREAD':>11}",
+        f"{'ADDRESS':<28}{'ST':<4}{'LEAD':>6} {'CLASS':<11}{'DEAL':>6} "
+        f"{'DECISION':<18}{'OFFER':>11}{'FEE':>10}  {'FEE STATUS':<12}",
         "-" * WIDTH,
     ]
 
     shown = hot_leads(report, lead_config) if hot_only else prioritize(report.results)
     for result in shown:
         lead = result.lead
-        address = (lead.address or lead.display_id())[:29]
+        address = (lead.address or lead.display_id())[:27]
         deal = "  —  " if result.deal_score is None else f"{result.deal_score:5.1f}"
         if result.status != STATUS_ANALYZED:
             decision = result.status.replace("_", " ")[:17]
-            offer = spread = "—"
+            offer = fee = "—"
+            fee_status = ""
         else:
             analysis = result.analysis
             decision = str(analysis.decision)[:17]
             offer = money(analysis.financials.recommended_offer, unknown="—")
-            spread = money(analysis.financials.potential_gross_spread, unknown="—")
+            fee = money(analysis.financials.binding_wholesale_fee, unknown="—")
+            fee_status = str(analysis.financials.wholesale_fee_status)
         lines.append(
-            f"{address:<30}{lead.state or '--':<4}{result.score.total:>6.1f} "
+            f"{address:<28}{lead.state or '--':<4}{result.score.total:>6.1f} "
             f"{str(result.score.classification):<11}{deal:>6} {decision:<18}"
-            f"{offer:>12}{spread:>11}"
+            f"{offer:>11}{fee:>10}  {fee_status:<12}"
         )
 
     hot = hot_leads(report, lead_config)
@@ -235,6 +267,10 @@ def render_lead_summary(
     lines.append(
         "LEAD score = worth a call. DEAL score = worth a contract. They are not the "
         "same test, and a hot lead can still be a bad deal."
+    )
+    lines.append(
+        f"FEE = assignment fee the deal supports at the price on the table, against a "
+        f"{money(lead_config_target(report))} target. It is not the MAO cushion."
     )
     lines.append("=" * WIDTH)
     return "\n".join(lines)

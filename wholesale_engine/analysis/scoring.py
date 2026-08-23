@@ -79,19 +79,22 @@ def _score_wholesale_spread(
             "Wholesale spread", weight, 0.0, "Cannot be measured without a MAO and an asking price."
         )
     spread = financials.mao - lead.asking_price
-    fee = max(config.wholesale_fee, 1.0)
+    fee = max(config.target_wholesale_fee, 1.0)
+    # Scoring 0.5 means the fee lands exactly on target: MAO == asking.
     score = _clamp(0.5 + (spread / (2 * fee)) * 0.5)
+    achievable = financials.wholesale_fee_at_asking
     if spread >= 0:
         note = (
-            f"MAO exceeds asking by ${spread:,.0f}, on top of the "
-            f"${config.wholesale_fee:,.0f} fee already inside the MAO."
+            f"At the asking price the deal supports about {money(achievable)} of "
+            f"assignment fee, against a {money(config.required_wholesale_fee)} target."
         )
     else:
         note = (
-            f"Asking price is ${abs(spread):,.0f} above MAO — the seller has to come "
-            "down for this to work."
+            f"Asking is {money(abs(spread))} above MAO, leaving about {money(achievable)} "
+            f"of fee against a {money(config.required_wholesale_fee)} target — the price "
+            "has to come down."
         )
-    return ScoreComponent("Wholesale spread", weight, score, note)
+    return ScoreComponent("Wholesale economics", weight, score, note)
 
 
 def _score_comp_quality(
