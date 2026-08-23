@@ -53,13 +53,22 @@ from .lead_hunter.models import (
 from .lead_hunter.normalizer import deduplicate
 from .lead_hunter.pipeline import arv_status
 from .lead_hunter.scoring import score_lead
+from .priority import DEFAULT_PRIORITY_ENGINE, PriorityEngine, PriorityScore
 from .providers import (
     Capability,
     HuntCriteria,
     ProviderMetrics,
     PropertyDataProvider,
 )
-from .storage import ChangeSet, LeadStore, StoredLead, dedupe_key, detect_changes
+from .research import PropertyResearch, PropertyResearchService
+from .storage import (
+    ChangeSet,
+    LeadSnapshot,
+    LeadStore,
+    StoredLead,
+    dedupe_key,
+    detect_changes,
+)
 
 #: Stage labels, in funnel order. Reported by ProviderMetrics.stages.
 STAGE_SEARCHED = "raw leads from source"
@@ -101,6 +110,11 @@ class HuntResult:
     changes: Dict[str, ChangeSet] = field(default_factory=dict)
     #: Lead-hunter results ordered best-first, change bumps applied.
     prioritized: List[LeadResult] = field(default_factory=list)
+    #: Normalized research, keyed by dedupe key. Empty for leads that did not
+    #: reach the research stage — which is the point of the cost controls.
+    research: Dict[str, PropertyResearch] = field(default_factory=dict)
+    #: Priority scores, keyed by dedupe key.
+    priorities: Dict[str, PriorityScore] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
     notices: List[str] = field(default_factory=list)
     provider_name: str = ""
@@ -109,11 +123,28 @@ class HuntResult:
     def change_for(self, lead: Lead) -> Optional[ChangeSet]:
         return self.changes.get(dedupe_key(lead))
 
+    def research_for(self, lead: Lead) -> Optional[PropertyResearch]:
+        return self.research.get(dedupe_key(lead))
+
+    def priority_for(self, lead: Lead) -> Optional[PriorityScore]:
+        return self.priorities.get(dedupe_key(lead))
+
     def priority_of(self, result: LeadResult) -> float:
-        """Working priority: deal score, plus any change-driven bump."""
+        """The PRIORITY SCORE for this lead, 0-100.
+
+        Falls back to the deal score plus any change bump when the priority
+        engine has not run — an unresearched lead still needs an ordering.
+        """
+        priority = self.priority_for(result.lead)
+        if priority is not None:
+            return priority.total
         base = result.deal_score if result.deal_score is not None else result.score.total
         change = self.change_for(result.lead)
         return base + (change.priority_bump if change else 0.0)
+
+    def band_of(self, result: LeadResult) -> str:
+        priority = self.priority_for(result.lead)
+        return str(priority.band) if priority else ""
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +290,7 @@ def run_hunt(
     budget: Optional[HuntBudget] = None,
     store: Optional[LeadStore] = None,
     as_of: Optional[date] = None,
+    priority_engine: Optional[PriorityEngine] = None,
 ) -> HuntResult:
     """Run the full cost-controlled funnel against one provider."""
     criteria = criteria or HuntCriteria(states=lead_config.target_states)
@@ -330,7 +362,7 @@ def run_hunt(
     scored.sort(key=lambda r: -r.score.total)
     metrics.record_stage(STAGE_LEAD_SCORED, len(scored))
 
-    # --- 5. property research (BILLABLE) ---------------------------------
+    # --- 5. property / owner / distress / equity research (BILLABLE) -----
     research_pool = [
         entry for entry in scored
         if entry.score.total >= budget.research_min_lead_score
@@ -340,6 +372,14 @@ def run_hunt(
     )
     researched_ids = {id(lead) for lead in researched}
     metrics.record_stage(STAGE_RESEARCHED, len(researched))
+
+    # The normalized research record, built for exactly the leads that earned
+    # the enrichment. Everything else stays unresearched, deliberately.
+    research_service = PropertyResearchService(provider, metrics)
+    for lead in researched:
+        research = research_service.research(lead, as_of)
+        result.research[dedupe_key(lead)] = research
+        _apply_research(lead, research)
 
     # --- 6. comps (MOST BILLABLE) ----------------------------------------
     comp_pool = [
@@ -370,11 +410,33 @@ def run_hunt(
     metrics.record_stage(STAGE_ANALYZED, analyzed)
 
     # --- 8. change detection + persistence -------------------------------
+    # Changes are detected before priority, because a price drop feeds into it.
     if store is not None:
         for entry in report.results:
-            result.changes[dedupe_key(entry.lead)] = _record(store, entry, as_of)
+            result.changes[dedupe_key(entry.lead)] = _diff(store, entry)
 
-    # --- 9. prioritize ----------------------------------------------------
+    # --- 9. PRIORITY SCORE ------------------------------------------------
+    engine = priority_engine or PriorityEngine(
+        target_wholesale_fee=engine_config.target_wholesale_fee
+    )
+    for entry in report.results:
+        key = dedupe_key(entry.lead)
+        result.priorities[key] = _score_priority(
+            engine, entry, result.research.get(key), result.changes.get(key)
+        )
+
+    # --- 10. persist the finished picture ---------------------------------
+    if store is not None:
+        for entry in report.results:
+            key = dedupe_key(entry.lead)
+            _record(
+                store, entry, as_of,
+                result.changes.get(key),
+                result.research.get(key),
+                result.priorities.get(key),
+            )
+
+    # --- 11. order --------------------------------------------------------
     result.prioritized = sorted(
         report.results,
         key=lambda r: (
@@ -389,16 +451,106 @@ def run_hunt(
     return result
 
 
-def _record(store: LeadStore, entry: LeadResult, as_of: Optional[date]) -> ChangeSet:
-    """Diff against the stored record, then persist this sighting."""
+def _apply_research(lead: Lead, research: PropertyResearch) -> None:
+    """Feed research findings back onto the lead, filling blanks only.
+
+    The analyzer reads the :class:`Lead`, so anything research established has
+    to land there for it to matter. Existing values are never overwritten —
+    research adds facts, it does not relitigate the ones already on file.
+    """
+    for attr, fact in (
+        ("beds", research.beds),
+        ("baths", research.baths),
+        ("sqft", research.sqft),
+        ("year_built", research.year_built),
+        ("estimated_value", research.estimated_value),
+        ("estimated_repairs", research.estimated_repairs),
+        ("days_on_market", research.days_on_market),
+    ):
+        if getattr(lead, attr, None) is None and fact.is_known:
+            setattr(lead, attr, fact.value)
+
+    if lead.estimated_equity is None and research.equity.is_verified_enough_to_lean_on:
+        lead.estimated_equity = research.equity.equity_amount
+
+    if not lead.owner_name and research.owner.owner_name.is_known:
+        lead.owner_name = str(research.owner.owner_name.value)
+
+    # Distress signals research confirmed that the lead did not carry.
+    for name, value in research.distress.as_bools().items():
+        if value is not None and getattr(lead, name, "missing") is None:
+            setattr(lead, name, value)
+
+    for caveat in research.equity.caveats:
+        if caveat not in lead.needs_verification:
+            lead.needs_verification.append(caveat)
+
+
+def _score_priority(
+    engine: PriorityEngine,
+    entry: LeadResult,
+    research: Optional[PropertyResearch],
+    change: Optional[ChangeSet],
+) -> PriorityScore:
+    """Assemble the priority inputs from wherever they live."""
+    analysis = entry.analysis
+    financials = analysis.financials if analysis else None
+
+    data_confidence = None
+    if analysis is not None:
+        for component in analysis.score.components:
+            if component.name == "Data confidence":
+                data_confidence = component.score
+                break
+
+    distress_count = research.distress.count if research else len(entry.lead.confirmed_signals())
+    urgent_count = research.distress.urgent_count if research else 0
+
+    equity_pct = research.equity.equity_percentage if research else entry.lead.equity_ratio
+    equity_calculated = (
+        research.equity.is_verified_enough_to_lean_on if research else False
+    )
+
+    price_drop_pct = None
+    if change is not None:
+        for detected in change.of_kind("PRICE DROP"):
+            before, after = detected.before, detected.after
+            if before:
+                price_drop_pct = (before - after) / before
+        for detected in change.of_kind("PRICE INCREASE"):
+            before, after = detected.before, detected.after
+            if before:
+                price_drop_pct = -(after - before) / before
+
+    return engine.score(
+        lead_score=entry.score.total,
+        deal_score=entry.deal_score,
+        wholesale_fee=financials.binding_wholesale_fee if financials else None,
+        data_confidence=data_confidence,
+        arv_confidence=analysis.arv.confidence if analysis else None,
+        comp_confidence=analysis.comps.confidence if analysis else None,
+        distress_count=distress_count,
+        urgent_distress_count=urgent_count,
+        equity_percentage=equity_pct,
+        equity_is_calculated=equity_calculated,
+        price_drop_percentage=price_drop_pct,
+        days_on_market=entry.lead.days_on_market,
+        decision=str(analysis.decision) if analysis else None,
+    )
+
+
+def _diff(store: LeadStore, entry: LeadResult) -> ChangeSet:
+    """Compare this sighting against the stored record, without writing."""
     lead = entry.lead
     previous: Optional[StoredLead] = store.get_for_lead(lead)
-    changes = detect_changes(
+    return detect_changes(
         previous,
         address=lead.address,
         asking_price=lead.asking_price,
         estimated_value=lead.estimated_value,
         estimated_repairs=lead.estimated_repairs,
+        arv=entry.analysis.arv.arv if entry.analysis else None,
+        days_on_market=lead.days_on_market,
         signals={
             name: getattr(lead, name, None)
             for name in (
@@ -410,12 +562,52 @@ def _record(store: LeadStore, entry: LeadResult, as_of: Optional[date]) -> Chang
         lead_score=entry.score.total,
         deal_score=entry.deal_score,
     )
+
+
+def _record(
+    store: LeadStore,
+    entry: LeadResult,
+    as_of: Optional[date],
+    changes: Optional[ChangeSet] = None,
+    research: Optional[PropertyResearch] = None,
+    priority: Optional[PriorityScore] = None,
+) -> None:
+    """Persist this sighting, with its analysis, research and priority."""
+    analysis = entry.analysis
+    financials = analysis.financials if analysis else None
+    equity = research.equity if research else None
+
+    snapshot = LeadSnapshot(
+        priority_score=priority.total if priority else None,
+        priority_band=str(priority.band) if priority else "",
+        arv=analysis.arv.arv if analysis else None,
+        repair_estimate=analysis.repairs.base if analysis else None,
+        mao=financials.mao if financials else None,
+        recommended_offer=financials.recommended_offer if financials else None,
+        potential_fee=financials.binding_wholesale_fee if financials else None,
+        fee_status=str(financials.wholesale_fee_status) if financials else "",
+        arv_confidence=str(analysis.arv.confidence) if analysis else "",
+        comp_confidence=str(analysis.comps.confidence) if analysis else "",
+        equity_amount=equity.equity_amount if equity else None,
+        equity_percentage=equity.equity_percentage if equity else None,
+        equity_status=str(equity.equity_status) if equity else "",
+        distress_count=research.distress.count if research else 0,
+        days_on_market=entry.lead.days_on_market,
+        researched=research is not None,
+        research_note=(
+            f"{research.known_field_count} field(s) known, "
+            f"{research.source_confidence} confidence, "
+            f"{research.distress.count} distress signal(s)"
+            if research
+            else ""
+        ),
+    )
     store.upsert_lead(
-        lead,
+        entry.lead,
         lead_score=entry.score.total,
         deal_score=entry.deal_score,
-        final_decision="" if entry.analysis is None else str(entry.analysis.decision),
+        final_decision="" if analysis is None else str(analysis.decision),
         seen_at=as_of,
-        change_summary=changes.summary(),
+        change_summary=changes.summary() if changes else "",
+        snapshot=snapshot,
     )
-    return changes

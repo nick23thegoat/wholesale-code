@@ -41,6 +41,7 @@ wholesale_engine/
 ├── config.py                   every tunable assumption (fee, 70% rule, weights, thresholds)
 ├── settings.py                 credentials from the environment / .env (WAVE 4)
 ├── hunt.py                     the cost-controlled funnel (WAVE 4)
+├── priority.py                 the PRIORITY SCORE — a third, separate ranking (WAVE 4)
 ├── requirements.txt            stdlib only; pytest optional
 ├── README.md
 ├── models/
@@ -72,9 +73,16 @@ wholesale_engine/
 │   ├── http_provider.py        real-vendor template — inert until one is chosen
 │   ├── registry.py             --source selection; no paid vendor pre-selected
 │   └── metrics.py              provider call counting and the funnel report
+├── research/                   WAVE 4
+│   ├── facts.py                Fact: a value + its source + its confidence
+│   ├── property_research.py    PropertyResearchService — the research pass
+│   ├── owner_research.py       ownership of record (never contact data)
+│   ├── distress.py             normalized distress signals with provenance
+│   ├── equity.py               equity vs. a value-minus-asking spread
+│   └── models.py               PropertyResearch — the normalized result
 ├── storage/                    WAVE 4
-│   ├── database.py             SQLite lead store, 7 workflow statuses
-│   └── changes.py              price drops, new distress, score movement
+│   ├── database.py             SQLite store, watchlist, notes, activity, search
+│   └── changes.py              price drops, ARV/DOM moves, new distress
 ├── outputs/                    WAVE 4
 │   └── adapters.py             CSV + JSON adapters; Sheets seam (not connected)
 ├── data/
@@ -90,9 +98,11 @@ wholesale_engine/
     ├── csv_report.py           the Wave 1 flat CSV export
     ├── lead_report.py          lead_pipeline.csv + hot_leads.csv
     ├── hunt_report.py          the four Wave 4 CSVs + JSON + console summary
+    ├── dossier.py              the property research screen (--property)
+    ├── deal_tables.py          --top-deals / --hot-leads / --search tables
     └── output/                 generated files land here
 .env.example                    credential placeholders (copy to .env)
-tests/                          344 unit + end-to-end tests
+tests/                          517 unit + end-to-end tests
 ```
 
 The layering is strict, and it is what makes each wave additive:
@@ -760,6 +770,12 @@ pytest tests -v                              # if pytest is installed
   seven statuses, change detection, and the five output files.
 - `tests/test_wave4_hunt.py` — the funnel end to end, the CLI, and the check
   that the hunt reproduces Wave 2's analysis **exactly** (no second analyzer).
+- `tests/test_research.py` — facts and provenance, the property/owner/distress
+  research services, and the equity engine's refusal to call a spread equity.
+- `tests/test_priority.py` — the PRIORITY SCORE: every band, every component,
+  and the rule that a below-target fee is never disqualifying.
+- `tests/test_watchlist.py` — the ten statuses, notes, the activity log, every
+  search filter, the ranked tables, the dossier, and the new CLI commands.
 
 `Wave1RegressionTests` re-asserts the original Wave 1 sample decisions, so a
 later change that altered underwriting behaviour would fail the suite.
@@ -1032,6 +1048,7 @@ than an error.
 | Skip tracing | interface only. No provider, no phone number or email ever generated. |
 | Google Sheets / CRM | adapter seam only. Needs a service account. |
 | Live property data | needs a vendor chosen from its own API documentation. |
+| Skip tracing (again) | the `research/` layer holds no contact field at all. |
 
 Two rules keep this safe as it grows:
 
@@ -1042,7 +1059,162 @@ Two rules keep this safe as it grows:
 
 ---
 
-## 12. Disclaimer
+## 12. The research engine, priority, and the watchlist (Wave 4, part 2)
+
+The full pipeline, with the research layer in place:
+
+```
+LEAD SOURCE -> PROPERTY RESEARCH -> OWNER RESEARCH -> DISTRESS -> EQUITY
+   -> COMPS -> ARV -> REPAIRS -> MAO -> OFFER
+   -> LEAD SCORE -> DEAL SCORE -> PRIORITY -> HOT LEAD
+```
+
+Everything left of COMPS is new; everything from COMPS rightwards is the Wave 1
+analyzer, unchanged.
+
+### Facts, not values
+
+Every researched field is a `Fact`: a value, the source it came from, and how
+much to trust it.
+
+```python
+Fact.reported(True, "county_records", Confidence.HIGH)
+Fact.unknown("no public-record source configured")
+```
+
+A bare `None` cannot say whether nobody looked, somebody looked and found
+nothing, or a source reported it and the source is unreliable. `Fact` says
+which — which is why nothing in this layer can quietly manufacture a value.
+
+Confidence is `HIGH` only for a primary source. A lead-list CSV is somebody's
+claim, so it is `MEDIUM` at best.
+
+### Equity vs. the spread
+
+This is the number most often got wrong in wholesaling, so the engine keeps
+four cases apart:
+
+| Status | Means |
+| --- | --- |
+| `CALCULATED` | value − mortgage − liens. The real thing. |
+| `REPORTED` | a source handed us a number. Their claim, unverified. |
+| `DERIVED (mortgage unknown)` | value − asking price. **A spread, not equity.** |
+| `UNKNOWN` | no mortgage information at all. |
+
+Value minus asking price equals equity only if the property is free and clear.
+It is useful, and it is never labelled as though a mortgage had been checked —
+a derived spread cannot set the high-equity signal that the lead score pays
+points for, and a missing mortgage balance never becomes `0`.
+
+### Owner research
+
+Ownership of record only: name, mailing address, years owned, properties owned,
+entity/LLC detection. **Never a phone number or an email address** — that is
+skip tracing, a separate regulated step with no provider connected. An owner
+record has no field that could hold contact data, and a test asserts it.
+
+Entity ownership is derived from the name ("SUNSHINE HOLDINGS LLC" → `LLC`) and
+raises a note: confirm who can bind the entity before you paper a contract.
+
+### PRIORITY SCORE
+
+The third score. Three questions, deliberately never merged:
+
+| Score | Question |
+| --- | --- |
+| **LEAD SCORE** | is this worth a phone call? |
+| **DEAL SCORE** | is this worth a contract? |
+| **PRIORITY SCORE** | what do I work on first? |
+
+Priority *reads* the other two and never writes to them. It adds what they
+deliberately ignore: data confidence, distress urgency, whether the price just
+moved, and how long it has sat. A deal you cannot verify ranks below one you
+can, at the same deal score — that is the point.
+
+```
+deal score 26 · lead score 16 · wholesale fee 14 · data confidence 12
+distress 10 · equity 8 · price movement 8 · days on market 6
+```
+
+Bands: `🔥 PRIORITY` 80+ · `🟠 HIGH` 65+ · `🟡 REVIEW` 50+ · `🔵 LOW` 30+ ·
+`❌ REJECT` below. A `❌ PASS` from the analyzer is capped below LOW — priority
+ranks what is worth working, and the analyzer already answered that.
+
+**The fee is a target here too.** Fee credit is proportional and never
+disqualifying: $13,000 against an $18,000 target scores most of the way, and a
+below-target deal can still reach `🔥 PRIORITY`.
+
+### The deal watchlist
+
+```
+NEW -> WATCH -> HOT -> CONTACT -> OFFER_SENT -> UNDER_CONTRACT -> ASSIGNED
+                    -> PASSED / DEAD / CLOSED at any point
+```
+
+Nothing enforces the order — deals skip steps and go backwards — but every move
+is recorded with where it came from and why, so the history answers "what
+happened to that one?" months later. A status you set by hand survives the next
+hunt; the source relisting a property does not reset it to NEW.
+
+### Notes and activity
+
+Notes are yours, free-text, and the engine never writes one for you (a test
+asserts a freshly hunted lead has none). The activity log records lead created,
+lead updated, score changed, price changed, status changed, note added,
+research completed, and offer calculated — each with a timestamp, the property,
+a type and a description.
+
+### Commands
+
+```bash
+# Rank what to work on
+python3 -m wholesale_engine.main --top-deals --limit 20
+python3 -m wholesale_engine.main --hot-leads
+python3 -m wholesale_engine.main --watchlist
+
+# Search the local database
+python3 -m wholesale_engine.main --search --states MO --min-lead-score 70
+python3 -m wholesale_engine.main --search --vacant --probate --min-fee 15000
+python3 -m wholesale_engine.main --search --text "Sabal" --open-only
+
+# The research screen for one property
+python3 -m wholesale_engine.main --property LH-011
+
+# Work a lead
+python3 -m wholesale_engine.main --property LH-011 \
+    --set-status HOT --reason "verified ARV" \
+    --note "Called seller 8/22. Wants a quick close."
+
+# What has happened lately
+python3 -m wholesale_engine.main --activity --limit 20
+
+# Export (CSV, JSON, or both)
+python3 -m wholesale_engine.main --export-hot --export-top-deals \
+    --export-watchlist --format both
+```
+
+Search filters: `--states --counties --cities --zip-codes --property-types
+--min-price --max-price --min-arv --max-arv --min-equity --min-fee
+--min-lead-score --min-deal-score --min-priority-score --min-dom --max-dom
+--vacant --absentee --high-equity --pre-foreclosure --foreclosure
+--tax-delinquent --probate --inherited --code-violation --tired-landlord
+--status --open-only --text --sort-by --limit`.
+
+### The dossier
+
+`--property <id>` is the main research screen: PROPERTY · OWNER · DISTRESS ·
+EQUITY · VALUATION · COMPS · REPAIRS · MAO AND OFFER · WHOLESALE ECONOMICS ·
+SCORES (all three) · FINAL DECISION · RISK FLAGS · MISSING DATA · STATUS ·
+ACTIVITY HISTORY · NOTES.
+
+It re-runs research and analysis live rather than printing only the stored
+snapshot, and every section can say "unknown" — several usually will. That is
+the report working correctly. A dossier that never admits a gap is one that is
+making things up.
+
+---
+
+## 13. Disclaimer
 
 This is a screening tool, not investment, legal, or appraisal advice. It works
 only from the data you give it, and no deal it scores is guaranteed profitable.

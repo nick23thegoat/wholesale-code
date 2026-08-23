@@ -40,11 +40,14 @@ class CsvProvider(PropertyDataProvider):
         super().__init__(metrics)
         self.path = Path(path)
         self.comps_path = Path(comps_path) if comps_path else None
-        self.capabilities = (
-            (Capability.SEARCH, Capability.COMPS)
-            if self.comps_path
-            else (Capability.SEARCH,)
-        )
+        # Add COMPS to whatever this class declares rather than replacing the
+        # tuple: a subclass that also supports OWNER or DISTRESS must keep it.
+        declared = tuple(type(self).capabilities)
+        if self.comps_path and Capability.COMPS not in declared:
+            declared += (Capability.COMPS,)
+        elif not self.comps_path:
+            declared = tuple(c for c in declared if c is not Capability.COMPS)
+        self.capabilities = declared
         self._source = CsvLeadSource(self.path)
         self._comps_attached = False
         self.warnings: List[str] = []

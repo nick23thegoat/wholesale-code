@@ -32,10 +32,19 @@ STREET_SUFFIXES: Dict[str, str] = {
     "TRAIL": "TRL", "TRL": "TRL",
     "SQUARE": "SQ", "SQ": "SQ",
     "LOOP": "LOOP",
-    "WAY": "WAY",
+    # "WY" is also Wyoming's abbreviation, but street suffixes are folded from
+    # the address line only — the state is normalized separately.
+    "WAY": "WAY", "WY": "WAY",
     "RUN": "RUN",
     "COVE": "CV", "CV": "CV",
     "CROSSING": "XING", "XING": "XING",
+    "PLAZA": "PLZ", "PLZ": "PLZ",
+    "TRACE": "TRCE", "TRCE": "TRCE",
+    "POINT": "PT", "PT": "PT",
+    "RIDGE": "RDG", "RDG": "RDG",
+    "HOLLOW": "HOLW", "HOLW": "HOLW",
+    "PATH": "PATH",
+    "BEND": "BND", "BND": "BND",
 }
 
 #: Directionals folded to their abbreviation.

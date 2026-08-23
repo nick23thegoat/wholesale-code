@@ -67,18 +67,34 @@ class FunnelTests(unittest.TestCase):
         statuses = [r.status == STATUS_ANALYZED for r in result.prioritized]
         self.assertEqual(statuses, sorted(statuses, reverse=True))
 
-    def test_a_change_bump_raises_working_priority_not_the_scores(self):
+    def test_priority_is_its_own_score_not_the_deal_score(self):
         store = LeadStore(":memory:")
         run_hunt(CsvProvider(SAMPLE_LEADS, SAMPLE_LEAD_COMPS), HuntCriteria(), store=store)
         second = run_hunt(
             CsvProvider(SAMPLE_LEADS, SAMPLE_LEAD_COMPS), HuntCriteria(), store=store
         )
         for entry in second.report.results:
-            change = second.change_for(entry.lead)
-            base = entry.deal_score if entry.deal_score is not None else entry.score.total
-            self.assertEqual(
-                second.priority_of(entry), base + (change.priority_bump if change else 0)
-            )
+            priority = second.priority_for(entry.lead)
+            self.assertIsNotNone(priority, entry.lead.address)
+            self.assertEqual(second.priority_of(entry), priority.total)
+            self.assertGreaterEqual(priority.total, 0.0)
+            self.assertLessEqual(priority.total, 100.0)
+        store.close()
+
+    def test_priority_never_writes_back_to_the_other_two_scores(self):
+        store = LeadStore(":memory:")
+        with_priority = run_hunt(
+            CsvProvider(SAMPLE_LEADS, SAMPLE_LEAD_COMPS), HuntCriteria(), store=store
+        )
+        without = run_from_csv(SAMPLE_LEADS, comps_path=SAMPLE_LEAD_COMPS)
+        baseline = {r.lead.address: r for r in without.results}
+        for entry in with_priority.report.results:
+            other = baseline.get(entry.lead.address)
+            if other is None:
+                continue
+            self.assertEqual(entry.score.total, other.score.total, entry.lead.address)
+            if entry.analysis and other.analysis:
+                self.assertEqual(entry.analysis.score.total, other.analysis.score.total)
         store.close()
 
     def test_the_summary_renders(self):
@@ -211,11 +227,11 @@ class CliTests(unittest.TestCase):
         self._run(["--sample", "--quiet"])
         self._run(["--sample-leads", "--quiet"])
 
-    def test_min_fee_is_settable_from_the_cli(self):
+    def test_the_viability_floor_is_settable_from_the_cli(self):
         from wholesale_engine.main import build_parser
 
-        args = build_parser().parse_args(["--sample", "--min-fee", "0"])
-        self.assertEqual(args.min_fee, 0.0)
+        args = build_parser().parse_args(["--sample", "--viable-fee", "0"])
+        self.assertEqual(args.viable_fee, 0.0)
         self.assertEqual(DEFAULT_CONFIG.min_viable_wholesale_fee, 10_000.0)
 
 

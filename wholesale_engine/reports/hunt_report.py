@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from ..formatting import money
 from ..lead_hunter.models import STATUS_ANALYZED, LeadResult
+from ..models.enums import Decision
 from ..outputs import CsvAdapter, JsonAdapter
 from ..storage import ChangeSet
 
@@ -179,8 +180,9 @@ def split_outputs(
         if result.status != STATUS_ANALYZED:
             rejected.append(row)
             continue
+        # Exact match: "GO" is a substring of "NEGOTIATE".
         decision = str(result.analysis.decision) if result.analysis else ""
-        if result.is_hot_lead and "GO" in decision:
+        if result.is_hot_lead and decision == str(Decision.GO):
             hot.append(row)
         else:
             review.append(row)

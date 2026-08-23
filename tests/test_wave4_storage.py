@@ -29,6 +29,7 @@ from wholesale_engine.reports.hunt_report import (
 )
 from wholesale_engine.storage import (
     LEAD_STATUSES,
+    LeadSnapshot,
     STATUS_CONTACT,
     STATUS_HOT,
     STATUS_NEW,
@@ -71,10 +72,13 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(stored.times_seen, 1)
         self.assertTrue(stored.is_new)
 
-    def test_all_seven_statuses_exist(self):
+    def test_the_watchlist_statuses_all_exist(self):
         self.assertEqual(
             set(LEAD_STATUSES),
-            {"NEW", "RESEARCHED", "HOT", "CONTACT", "UNDER_CONTRACT", "PASSED", "DEAD"},
+            {
+                "NEW", "WATCH", "RESEARCHED", "HOT", "CONTACT", "OFFER_SENT",
+                "UNDER_CONTRACT", "ASSIGNED", "CLOSED", "PASSED", "DEAD",
+            },
         )
 
     def test_an_unknown_status_is_refused(self):
@@ -328,3 +332,66 @@ class OutputTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Expanded change detection (price drops, ARV, days on market, new listings)
+# ---------------------------------------------------------------------------
+
+
+class ExpandedChangeTests(unittest.TestCase):
+    def setUp(self):
+        self.store = LeadStore(":memory:")
+        self.store.upsert_lead(
+            lead(days_on_market=90),
+            lead_score=61.0,
+            deal_score=55.0,
+            snapshot=LeadSnapshot(arv=200_000, days_on_market=90),
+        )
+        self.stored = self.store.get_for_lead(lead())
+
+    def tearDown(self):
+        self.store.close()
+
+    def test_a_first_sighting_is_reported_as_a_new_listing(self):
+        from wholesale_engine.storage.changes import NEW_LISTING
+
+        changes = detect_changes(None, address="1 A St", asking_price=125_000)
+        self.assertTrue(changes.is_new)
+        self.assertTrue(changes.of_kind(NEW_LISTING))
+
+    def test_the_price_drop_amount_and_percentage_are_available(self):
+        changes = detect_changes(self.stored, asking_price=105_000)
+        self.assertTrue(changes.is_price_drop)
+        self.assertEqual(changes.price_drop_amount, 20_000)
+        self.assertAlmostEqual(changes.price_drop_percentage, 0.16, places=2)
+
+    def test_the_worked_example_reads_exactly_as_specified(self):
+        changes = detect_changes(self.stored, asking_price=99_000)
+        self.assertEqual(changes.price_drop_amount, 26_000)
+        self.assertIn("$125,000 -> $99,000", changes.summary())
+
+    def test_no_drop_means_no_amount_rather_than_zero(self):
+        changes = detect_changes(self.stored, asking_price=125_000)
+        self.assertIsNone(changes.price_drop_amount)
+        self.assertIsNone(changes.price_drop_percentage)
+
+    def test_an_arv_change_is_detected(self):
+        from wholesale_engine.storage.changes import ARV_CHANGE
+
+        changes = detect_changes(self.stored, arv=230_000)
+        self.assertTrue(changes.of_kind(ARV_CHANGE))
+
+    def test_a_days_on_market_jump_is_detected_and_raises_priority(self):
+        from wholesale_engine.storage.changes import DOM_CHANGE
+
+        changes = detect_changes(self.stored, days_on_market=150)
+        self.assertTrue(changes.of_kind(DOM_CHANGE))
+        self.assertGreater(changes.priority_bump, 0)
+
+    def test_a_trivial_days_on_market_move_is_ignored(self):
+        self.assertFalse(detect_changes(self.stored, days_on_market=95).has_changes)
+
+    def test_new_signals_are_listed_by_name(self):
+        changes = detect_changes(self.stored, signals={"pre_foreclosure": True})
+        self.assertIn("pre_foreclosure", changes.new_signals)

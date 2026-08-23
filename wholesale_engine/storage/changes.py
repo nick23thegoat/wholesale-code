@@ -61,8 +61,16 @@ NEW_SIGNAL = "NEW SIGNAL"
 SIGNAL_CLEARED = "SIGNAL CLEARED"
 VALUE_CHANGE = "NEW ESTIMATED VALUE"
 REPAIR_CHANGE = "NEW REPAIR ESTIMATE"
+ARV_CHANGE = "NEW ARV"
+DOM_CHANGE = "DAYS ON MARKET"
+NEW_LISTING = "NEW LISTING"
 LEAD_SCORE_CHANGE = "LEAD SCORE"
 DEAL_SCORE_CHANGE = "DEAL SCORE"
+
+#: Days on market that count as a meaningful jump since the last sighting.
+DOM_JUMP_DAYS = 30
+#: Priority for a listing that has gone materially staler.
+DOM_PRIORITY = 6.0
 
 
 @dataclass(frozen=True)
@@ -100,6 +108,35 @@ class ChangeSet:
 
     def of_kind(self, kind: str) -> List[Change]:
         return [c for c in self.changes if c.kind == kind]
+
+    @property
+    def price_drop(self) -> Optional[Change]:
+        drops = self.of_kind(PRICE_DROP)
+        return drops[0] if drops else None
+
+    @property
+    def price_drop_amount(self) -> Optional[float]:
+        """Dollars off since the last sighting. None when the price held."""
+        drop = self.price_drop
+        if drop is None or drop.before is None or drop.after is None:
+            return None
+        return float(drop.before) - float(drop.after)
+
+    @property
+    def price_drop_percentage(self) -> Optional[float]:
+        """Fraction off since the last sighting, e.g. 0.168 for -16.8%."""
+        drop = self.price_drop
+        if drop is None or not drop.before:
+            return None
+        return (float(drop.before) - float(drop.after)) / float(drop.before)
+
+    @property
+    def is_price_drop(self) -> bool:
+        return self.price_drop is not None
+
+    @property
+    def new_signals(self) -> List[str]:
+        return [c.field for c in self.of_kind(NEW_SIGNAL)]
 
     def summary(self) -> str:
         """One-line summary for a CSV cell or a log."""
@@ -158,6 +195,8 @@ def detect_changes(
     asking_price: Optional[float] = None,
     estimated_value: Optional[float] = None,
     estimated_repairs: Optional[float] = None,
+    arv: Optional[float] = None,
+    days_on_market: Optional[int] = None,
     signals: Optional[Dict[str, Optional[bool]]] = None,
     lead_score: Optional[float] = None,
     deal_score: Optional[float] = None,
@@ -175,6 +214,16 @@ def detect_changes(
         is_new=stored is None,
     )
     if stored is None:
+        if asking_price is not None:
+            result.changes.append(
+                Change(
+                    kind=NEW_LISTING,
+                    field="asking_price",
+                    before=None,
+                    after=asking_price,
+                    description=f"NEW LISTING at {money(asking_price)}",
+                )
+            )
         return result
 
     # --- price ---------------------------------------------------------
@@ -251,9 +300,32 @@ def detect_changes(
             REPAIR_CHANGE, "estimated_repairs", "Repair estimate",
             stored.estimated_repairs, estimated_repairs,
         ),
+        _money_change(ARV_CHANGE, "arv", "ARV", stored.arv, arv),
     ):
         if change is not None:
             result.changes.append(change)
+
+    # --- days on market --------------------------------------------------
+    # A listing that has sat another month is a seller who has had another
+    # month of nobody calling.
+    if (
+        stored.days_on_market is not None
+        and days_on_market is not None
+        and days_on_market - stored.days_on_market >= DOM_JUMP_DAYS
+    ):
+        result.changes.append(
+            Change(
+                kind=DOM_CHANGE,
+                field="days_on_market",
+                before=stored.days_on_market,
+                after=days_on_market,
+                description=(
+                    f"DAYS ON MARKET: {stored.days_on_market} -> {days_on_market} "
+                    f"(+{days_on_market - stored.days_on_market} days)"
+                ),
+                priority=DOM_PRIORITY,
+            )
+        )
 
     # --- scores ---------------------------------------------------------
     for kind, field_name, label, before, after in (
