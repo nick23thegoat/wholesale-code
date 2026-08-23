@@ -38,7 +38,23 @@ from wholesale_engine.lead_hunter import (  # noqa: E402
     run_from_csv as run_lead_hunter,
     with_overrides,
 )
+from wholesale_engine.hunt import HuntBudget, run_hunt  # noqa: E402
 from wholesale_engine.models.results import AnalysisResult  # noqa: E402
+from wholesale_engine.providers import (  # noqa: E402
+    HuntCriteria,
+    ProviderNotConfigured,
+    describe_sources,
+    get_provider,
+)
+from wholesale_engine.reports.hunt_report import (  # noqa: E402
+    render_hunt_summary,
+    write_hunt_outputs,
+)
+from wholesale_engine.settings import (  # noqa: E402
+    NO_PROVIDER_MESSAGE,
+    ProviderSettings,
+)
+from wholesale_engine.storage import DEFAULT_DB_PATH, LeadStore  # noqa: E402
 from wholesale_engine.reports import (  # noqa: E402
     render_batch_summary,
     render_lead_summary,
@@ -55,6 +71,7 @@ DEFAULT_OUTPUT = PACKAGE_ROOT / "reports" / "output" / "deal_analysis.csv"
 SAMPLE_LEADS = PACKAGE_ROOT / "data" / "lead_sources" / "sample_leads.csv"
 SAMPLE_LEAD_COMPS = PACKAGE_ROOT / "data" / "lead_sources" / "sample_lead_comps.csv"
 DEFAULT_LEAD_OUTPUT = PACKAGE_ROOT / "reports" / "output" / "lead_pipeline.csv"
+DEFAULT_OUTPUT_DIR = PACKAGE_ROOT / "reports" / "output"
 DEFAULT_HOT_OUTPUT = PACKAGE_ROOT / "reports" / "output" / "hot_leads.csv"
 
 
@@ -120,6 +137,68 @@ def build_parser() -> argparse.ArgumentParser:
     hunter.add_argument("--lead-out", type=Path, default=None, help=f"pipeline CSV (default: {DEFAULT_LEAD_OUTPUT})")
     hunter.add_argument("--hot-out", type=Path, default=None, help=f"hot-lead CSV (default: {DEFAULT_HOT_OUTPUT})")
 
+    hunt = parser.add_argument_group("hunt (Wave 4 — provider-backed)")
+    hunt.add_argument(
+        "--hunt",
+        action="store_true",
+        help="run the cost-controlled funnel: search -> filter -> score -> research -> comps -> deal",
+    )
+    hunt.add_argument(
+        "--source",
+        default="csv",
+        help="property-data provider (default: csv). Use --list-sources to see what is available.",
+    )
+    hunt.add_argument(
+        "--list-sources",
+        action="store_true",
+        help="show every provider and whether it is configured, then exit",
+    )
+    hunt.add_argument("--counties", help="comma-separated counties to search")
+    hunt.add_argument("--cities", help="comma-separated cities to search")
+    hunt.add_argument("--zip-codes", help="comma-separated ZIP codes to search")
+    hunt.add_argument("--min-price", type=float, default=None, help="lowest asking price to consider")
+    hunt.add_argument("--max-price", type=float, default=None, help="highest asking price to consider")
+    for signal, helptext in (
+        ("vacant", "reported vacant"),
+        ("absentee", "absentee owner"),
+        ("high-equity", "high equity"),
+        ("pre-foreclosure", "in pre-foreclosure"),
+        ("foreclosure", "in foreclosure"),
+        ("tax-delinquent", "tax delinquent"),
+        ("probate", "in probate"),
+        ("inherited", "inherited"),
+        ("code-violation", "carrying a code violation"),
+        ("tired-landlord", "a tired landlord"),
+    ):
+        hunt.add_argument(
+            f"--{signal}",
+            action="store_true",
+            help=f"require leads {helptext} (any-of when several are given; unknown never rejects)",
+        )
+    hunt.add_argument(
+        "--db",
+        type=Path,
+        default=None,
+        help=f"SQLite lead database (default: {DEFAULT_DB_PATH}); use :memory: to disable persistence",
+    )
+    hunt.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help=f"directory for hunt outputs (default: {DEFAULT_OUTPUT_DIR})",
+    )
+    hunt.add_argument(
+        "--research-limit", type=int, default=None,
+        help="cap on billable property-detail calls (default: 100)",
+    )
+    hunt.add_argument(
+        "--comps-limit", type=int, default=None,
+        help="cap on billable comp calls — the most expensive stage (default: 30)",
+    )
+    hunt.add_argument(
+        "--no-json", action="store_true", help="skip the JSON output"
+    )
+
     assumptions = parser.add_argument_group("underwriting assumptions")
     assumptions.add_argument(
         "--arv-pct",
@@ -132,6 +211,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_CONFIG.wholesale_fee,
         help="target wholesale fee in dollars (default: 18000)",
+    )
+    assumptions.add_argument(
+        "--min-fee",
+        type=float,
+        default=DEFAULT_CONFIG.min_viable_wholesale_fee,
+        help=(
+            "fee below which a deal is not called a GO (default: 10000). This is a "
+            "viability floor, NOT the target — pass 0 to let the deal score decide alone."
+        ),
     )
     assumptions.add_argument(
         "--strict",
@@ -206,6 +294,117 @@ def run_lead_pipeline_cli(args: argparse.Namespace, engine_config: EngineConfig)
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Wave 4 — hunt
+# ---------------------------------------------------------------------------
+
+#: CLI flag -> signal field name.
+SIGNAL_FLAGS = {
+    "vacant": "vacant",
+    "absentee": "absentee_owner",
+    "high_equity": "high_equity",
+    "pre_foreclosure": "pre_foreclosure",
+    "foreclosure": "foreclosure",
+    "tax_delinquent": "tax_delinquent",
+    "probate": "probate",
+    "inherited": "inherited",
+    "code_violation": "code_violation",
+    "tired_landlord": "tired_landlord",
+}
+
+
+def criteria_from_args(
+    args: argparse.Namespace, lead_config: LeadHunterConfig
+) -> HuntCriteria:
+    """Build the search criteria from the command line."""
+    signals = tuple(
+        field for flag, field in SIGNAL_FLAGS.items() if getattr(args, flag, False)
+    )
+    return HuntCriteria(
+        states=_split(args.states) or lead_config.target_states,
+        counties=_split(args.counties) or (),
+        cities=_split(args.cities) or (),
+        zip_codes=_split(args.zip_codes) or (),
+        property_types=_split(args.property_types) or lead_config.preferred_property_types,
+        min_price=args.min_price,
+        max_price=args.max_price if args.max_price is not None else args.max_asking_price,
+        min_equity=args.min_equity,
+        required_signals=signals,
+        min_lead_score=args.min_lead_score or 0.0,
+        min_deal_score=args.min_deal_score or 0.0,
+    )
+
+
+def run_hunt_cli(args: argparse.Namespace, engine_config: EngineConfig) -> int:
+    """``--hunt``: provider search through to the four output files."""
+    lead_config = lead_config_from_args(args)
+    criteria = criteria_from_args(args, lead_config)
+
+    settings = ProviderSettings.from_env()
+    requested = (args.source or "csv").strip().lower()
+    if requested != "csv" and not settings.has_property_data:
+        print(NO_PROVIDER_MESSAGE, file=sys.stderr)
+        missing = ", ".join(settings.missing_for_property_data())
+        print(
+            f"  '{requested}' needs {missing}. Copy .env.example to .env and fill it in.",
+            file=sys.stderr,
+        )
+        requested = "csv"
+
+    # Resolved after the fallback, so an unconfigured live source lands on a
+    # working CSV run rather than on an error about a missing file.
+    csv_path = args.leads or (SAMPLE_LEADS if requested == "csv" else None)
+    comps_path = args.lead_comps or (
+        SAMPLE_LEAD_COMPS if csv_path == SAMPLE_LEADS else None
+    )
+    if requested == "csv" and csv_path == SAMPLE_LEADS and not args.leads:
+        print(
+            "No --leads file given; hunting the bundled FICTIONAL sample lead list.",
+            file=sys.stderr,
+        )
+
+    try:
+        provider = get_provider(
+            requested, settings=settings, csv_path=csv_path, comps_path=comps_path
+        )
+    except ProviderNotConfigured as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 2
+
+    budget = HuntBudget()
+    if args.research_limit is not None:
+        budget.research_limit = args.research_limit
+    if args.comps_limit is not None:
+        budget.comps_limit = args.comps_limit
+
+    db_path = args.db or DEFAULT_DB_PATH
+    store = LeadStore(db_path)
+    try:
+        result = run_hunt(
+            provider,
+            criteria,
+            engine_config=engine_config,
+            lead_config=lead_config,
+            budget=budget,
+            store=store,
+        )
+    finally:
+        store.close()
+
+    if not args.quiet:
+        print(render_hunt_summary(result))
+
+    written = write_hunt_outputs(
+        result, args.out_dir or DEFAULT_OUTPUT_DIR, write_json=not args.no_json
+    )
+    if not args.quiet:
+        print()
+        for label in sorted(written):
+            print(f"{label:<20} -> {written[label]}")
+        print(f"{'lead database':<20} -> {db_path}")
+    return 0
+
+
 def render_all(results: List[AnalysisResult], config: EngineConfig) -> str:
     return "\n\n".join(render_result(result, config) for result in results)
 
@@ -213,12 +412,16 @@ def render_all(results: List[AnalysisResult], config: EngineConfig) -> str:
 def run(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
+    if args.list_sources:
+        print(describe_sources())
+        return 0
+
     hunting = bool(args.leads or args.sample_leads)
-    if not (args.sample or args.csv or args.json or hunting):
+    if not (args.sample or args.csv or args.json or hunting or args.hunt):
         build_parser().print_help()
         print(
-            "\nNothing to analyze. Start with:  --sample  (Wave 1)  or  "
-            "--sample-leads  (Wave 2)",
+            "\nNothing to analyze. Start with:  --sample  (Wave 1),  "
+            "--sample-leads  (Wave 2)  or  --hunt --source csv  (Wave 4)",
             file=sys.stderr,
         )
         return 2
@@ -231,7 +434,11 @@ def run(argv: Optional[List[str]] = None) -> int:
     config = EngineConfig(
         arv_percentage=args.arv_pct / 100.0,
         target_wholesale_fee=args.fee,
+        min_viable_wholesale_fee=args.min_fee,
     )
+
+    if args.hunt:
+        return run_hunt_cli(args, config)
 
     if hunting:
         return run_lead_pipeline_cli(args, config)

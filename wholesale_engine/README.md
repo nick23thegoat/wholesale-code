@@ -37,8 +37,10 @@ with a guess.
 
 ```
 wholesale_engine/
-├── main.py                     CLI entry point (Wave 1 + Wave 2)
+├── main.py                     CLI entry point (Waves 1, 2 and 4)
 ├── config.py                   every tunable assumption (fee, 70% rule, weights, thresholds)
+├── settings.py                 credentials from the environment / .env (WAVE 4)
+├── hunt.py                     the cost-controlled funnel (WAVE 4)
 ├── requirements.txt            stdlib only; pytest optional
 ├── README.md
 ├── models/
@@ -63,6 +65,18 @@ wholesale_engine/
 │       ├── base.py             BaseLeadSource: search_leads/get_property/…
 │       ├── csv_source.py       CSV source with column aliases
 │       └── api_source_template.py   template only — nothing connected
+├── providers/                  WAVE 4
+│   ├── base.py                 PropertyDataProvider: the five capabilities
+│   ├── criteria.py             HuntCriteria — geography, price, signals, gates
+│   ├── csv_provider.py         local CSV provider (works with no credentials)
+│   ├── http_provider.py        real-vendor template — inert until one is chosen
+│   ├── registry.py             --source selection; no paid vendor pre-selected
+│   └── metrics.py              provider call counting and the funnel report
+├── storage/                    WAVE 4
+│   ├── database.py             SQLite lead store, 7 workflow statuses
+│   └── changes.py              price drops, new distress, score movement
+├── outputs/                    WAVE 4
+│   └── adapters.py             CSV + JSON adapters; Sheets seam (not connected)
 ├── data/
 │   ├── csv_loader.py           CSV/JSON input parsing
 │   ├── sources.py              integration protocols (all NotImplemented)
@@ -75,14 +89,16 @@ wholesale_engine/
     ├── text_report.py          the full human-readable report
     ├── csv_report.py           the Wave 1 flat CSV export
     ├── lead_report.py          lead_pipeline.csv + hot_leads.csv
+    ├── hunt_report.py          the four Wave 4 CSVs + JSON + console summary
     └── output/                 generated files land here
-tests/                          236 unit + end-to-end tests
+.env.example                    credential placeholders (copy to .env)
+tests/                          344 unit + end-to-end tests
 ```
 
-The layering is strict, and it is the reason V2 integrations will be easy:
+The layering is strict, and it is what makes each wave additive:
 
 ```
-data (where facts come from) → models (what a fact looks like)
+providers / data (where facts come from) → models (what a fact looks like)
         → analysis (what the facts mean) → reports (how to say it)
 ```
 
@@ -109,6 +125,14 @@ Optional, for the nicer test runner:
 python3 -m pip install -r wholesale_engine/requirements.txt
 ```
 
+Optional, only when you are ready to connect a live data provider:
+
+```bash
+cp .env.example .env      # then fill in the keys from your provider account
+```
+
+`.env` is git-ignored. Everything in this README works without it.
+
 ---
 
 ## 3. How to run it
@@ -130,6 +154,20 @@ python3 -m wholesale_engine.main --csv my_leads.csv --comps my_comps.csv \
 # Try different underwriting assumptions
 python3 -m wholesale_engine.main --sample --arv-pct 65 --fee 25000
 ```
+
+### Wave 4 — the provider-backed hunt
+
+```bash
+# What can I use right now?
+python3 -m wholesale_engine.main --list-sources
+
+# The full funnel, no API key needed
+python3 -m wholesale_engine.main --hunt --source csv \
+    --states FL,TX,MO --min-lead-score 60 --min-deal-score 60
+```
+
+Section 11 covers providers, cost control, the lead database and change
+detection.
 
 ### Wave 2 — hunting through a raw lead list
 
@@ -580,43 +618,58 @@ below MAO and the fee is $31,500, not $13,500. The report labels the line
 
 ### Wholesale fee status
 
-Every deal reports three lines:
+**$18,000 is a target, not a minimum.** Nothing in the engine rejects or
+downgrades a deal for coming in under it. A $13,000 assignment on a strong
+deal is a real deal, and the engine treats it as one.
+
+Every fee figure is reported **with the price it was measured at**, because a
+fee without its price is meaningless:
 
 ```
 Target Wholesale Fee:       $18,000
-Potential Wholesale Fee:    $21,500
-Wholesale Fee Status:       MEETS TARGET
-  at recommended offer:     $31,500
-  at asking price:          $21,500
+  at your offer $59,500:    $25,500
+  at asking $71,000:        $14,000
+Potential Wholesale Fee:    $14,000 (at asking $71,000)
+Wholesale Fee Status:       BELOW TARGET
+Buyer Margin at Assignment: $7,500
 ```
 
-The status is judged **at the price actually on the table** — the asking price
-when the seller wants more than you plan to offer, otherwise the recommended
-offer. An offer the seller has not accepted cannot be what qualifies a deal,
-so a lead needing a $30,000 concession is never scored as if it were already
-agreed.
+The headline is judged **at the price actually on the table** — the asking
+price when the seller wants more than you plan to offer, otherwise your own
+offer. An offer the seller has not accepted cannot be what qualifies a deal.
 
 | Status | Meaning |
 | --- | --- |
-| `MEETS TARGET` | the deal supports the target fee at the binding price |
-| `BELOW TARGET` | it does not — raises the `BELOW TARGET WHOLESALE FEE` risk flag |
+| `MEETS TARGET` | the deal supports the full target fee at the binding price |
+| `BELOW TARGET` | it supports less — a **label and a scoring penalty**, never a rejection |
 | `UNKNOWN` | no ARV, no repair basis, or no price to measure against |
 
-**A 🔥 GO requires MEETS TARGET.** Everything else being perfect is not enough:
-if the fee is not there at the price on offer, the answer is 🟠 NEGOTIATE (or
-❌ PASS when the gap is too wide), never GO.
+BELOW TARGET does three things and no more:
 
-Both numbers stay configurable in `config.py`:
+1. labels the row and the report
+2. raises the `BELOW TARGET WHOLESALE FEE` risk flag, naming the shortfall and
+   what the seller would have to come down to close it
+3. lowers the `wholesale_spread` score component (16 of 100 points), which is
+   continuous — $14,000 scores below $18,000, which scores below $31,000
+
+The **deal score remains the decision mechanism**. The only fee-based gate is
+a viability floor far below the target, because "GO" has to mean something:
+
+```python
+min_viable_wholesale_fee: float = 10_000.0   # --min-fee 0 removes it entirely
+```
+
+At the defaults a $14,000 fee can be a 🔥 GO (carrying its flag); a $2,800 fee
+cannot be, at any score.
+
+All three numbers stay configurable in `config.py`:
 
 ```python
 ARV_PERCENTAGE: float = 0.70
 TARGET_WHOLESALE_FEE: float = 18_000.0
 ```
 
-or per run: `--arv-pct 65 --fee 25000`. To demand cushion *on top of* the fee
-before a deal counts as MEETS TARGET, set
-`EngineConfig(min_cushion_above_target=18_000)` — that requires $36,000 of
-total room, which is a deliberately stricter bar than a $18,000 minimum fee.
+or per run: `--arv-pct 65 --fee 25000 --min-fee 12000`.
 
 The engine **never recommends paying full MAO**. The haircut is assembled from
 named risks — unverified ARV, thin comps, condition-based rehab estimate,
@@ -697,8 +750,19 @@ pytest tests -v                              # if pytest is installed
   Wave 1 analyzer (including a check that the MAO comes from the Wave 1
   formula), the output files, the CLI, and the not-implemented seams.
 
+- `tests/test_wholesale_economics.py` — the fee kept separate from the cushion,
+  fee status at the binding price, and the audit's central rule: a below-target
+  fee can still reach GO, and no hidden knob turns the target into a minimum.
+- `tests/test_wave4_providers.py` — settings and credential handling, the
+  capability contract (unsupported is an answer, not a guess), the inert HTTP
+  template, the registry, criteria matching, and cost control.
+- `tests/test_wave4_storage.py` — the SQLite store, cross-run identity, all
+  seven statuses, change detection, and the five output files.
+- `tests/test_wave4_hunt.py` — the funnel end to end, the CLI, and the check
+  that the hunt reproduces Wave 2's analysis **exactly** (no second analyzer).
+
 `Wave1RegressionTests` re-asserts the original Wave 1 sample decisions, so a
-Wave 2 change that altered underwriting behaviour would fail the suite.
+later change that altered underwriting behaviour would fail the suite.
 
 ---
 
@@ -774,38 +838,200 @@ Map only the fields your source actually returns; leave the rest blank.
 
 ---
 
-## 11. Where the next modules plug in
+## 11. Wave 4 — the provider architecture
 
-Every future integration is a protocol already declared in
-`wholesale_engine/data/sources.py` or
-`wholesale_engine/lead_hunter/sources/base.py`. They raise
-`NotImplementedError` today, and implementing one requires **no change to the
-analysis layer**.
-
-| Wave 3 capability | Seam | Where it attaches |
-| --- | --- | --- |
-| **Property data APIs** | `BaseLeadSource.search_leads()` / `get_property()` | Copy `lead_hunter/sources/api_source_template.py`, implement the methods, register it in `sources/__init__.py`. `run_from_source()` takes it as-is. |
-| **Automated daily lead hunting** | the whole pipeline | Schedule `run_from_source(<source>)` and write the two CSVs — the pipeline is already one function call. |
-| **County / public-record data** | `PropertyEnricher.enrich(lead)` | A pass before `analyze_comps()`. This is what eventually retires the standing "title, lien, mortgage payoff, foreclosure status" gap — until then the engine asserts none of it. |
-| **Comp data feeds** | `BaseLeadSource.get_comps()` / `CompProvider` | Returns raw `Comp` objects appended to `lead.comps`, exactly like `--lead-comps` does today. Grading stays in `analysis/comps.py`, so vendor comps face the same reliability bar. |
-| **Skip tracing** | `lead_hunter/skip_trace.py` | `skip_trace_candidates(report)` already gates it: analyzed leads that did not come back PASS. You pay to trace deals, not rows. Regulated data (TCPA, state calling laws, DNC, CAN-SPAM) — needs consent tracking, DNC scrubbing and a suppression list first. No phone or email is ever generated. |
-| **Google Sheets / CRM** | `ResultSink.publish(results)` | Beside the CSV writers in `main.run()`. `lead_result_to_row()` already produces the flat dict a Sheets row or CRM record needs. |
-
-The intended Wave 3 flow (Wave 2 built everything left of SKIP TRACE):
+Wave 4 puts a data layer *in front of* the existing engine. It adds no
+arithmetic: every number still comes from the Wave 1 analyzer, and
+`tests/test_wave4_hunt.py` asserts that a lead run through the hunt produces
+byte-identical results to the same lead run through Wave 2.
 
 ```
-BaseLeadSource (API) ──┐
-                       ├─► List[Lead] ─► normalize ─► dedupe ─► lead score ─► filter
-CSV source ────────────┘                                                        │
-                                          PropertyEnricher (county/public record)│
-                                          CompProvider (comp feed) ──────────────┤
-                                                                                 ▼
-                                                        analysis.analyze_property()
-                                                                                 │
-                                    SkipTraceProvider ◄───────────────────────────┤ (GO / NEGOTIATE only)
-                                                                                 ▼
-                                        lead_pipeline.csv + hot_leads.csv + ResultSink (Sheets / CRM)
+provider.search_properties()  ─►  normalize ─► dedupe ─► cheap filters
+                                                              │
+                                                        lead score
+                                                              │
+                                    property research (BILLABLE, capped)
+                                                              │
+                                     comps / valuation (BILLABLE, capped)
+                                                              │
+                                     analyze_property()  (Wave 1, unchanged)
+                                                              │
+                          daily_leads · hot_leads · deals_to_review · rejected_leads
 ```
+
+### Running it
+
+```bash
+# Everything below works today, with no API key of any kind.
+python3 -m wholesale_engine.main --list-sources
+
+python3 -m wholesale_engine.main --hunt --source csv \
+    --states FL,TX,MO --min-lead-score 60 --min-deal-score 60
+
+# The full search surface
+python3 -m wholesale_engine.main --hunt --leads my_list.csv \
+    --states FL,TX --counties Hillsborough,Bexar --cities Tampa \
+    --zip-codes 33601,33602 --min-price 50000 --max-price 250000 \
+    --min-equity 40000 --vacant --probate --tax-delinquent \
+    --min-lead-score 60 --min-deal-score 60 \
+    --research-limit 100 --comps-limit 30
+```
+
+Signal flags are **any-of**, and an unknown value never rejects a lead — it
+becomes a gap to go and fill.
+
+### Providers
+
+A provider answers up to five questions. Only the first is required.
+
+| Capability | Purpose |
+| --- | --- |
+| `search_properties()` | find candidates matching the criteria |
+| `get_property()` | full detail for one property |
+| `get_owner()` | ownership of record — **never** phone or email |
+| `get_distress_data()` | liens, tax status, foreclosure filings |
+| `get_comps()` | comparable sales |
+
+Anything a provider does not support returns a `ProviderResponse` with
+`supported=False` and a reason. That is a clear answer, not an error and never
+a guess — the field stays blank and is reported as missing data.
+
+Two providers ship:
+
+| `--source` | Status |
+| --- | --- |
+| `csv` | ready. Local files, no credentials, no network, no cost. |
+| `http-template` | inert. A finished transport with no vendor wired to it. |
+
+**No paid vendor is pre-selected**, deliberately. Choosing one means reading
+that vendor's official API documentation, terms and pricing first. With no
+credentials configured the engine says so and runs in CSV/test mode; it never
+fabricates a live result.
+
+### Credentials
+
+Copy `.env.example` to `.env` (git-ignored) and fill it in:
+
+```
+PROPERTY_DATA_API_KEY=
+PROPERTY_DATA_BASE_URL=
+PUBLIC_RECORDS_API_KEY=
+COMPS_API_KEY=
+SKIP_TRACE_API_KEY=
+```
+
+A key alone is not enough for a live search: the base URL comes from the
+vendor's documentation, and the engine will not invent an endpoint. Nothing is
+ever hard-coded, and `ProviderSettings.describe()` never prints a credential.
+
+### Adding a real provider
+
+```python
+from wholesale_engine.providers import HttpPropertyDataProvider, register
+
+class MyVendor(HttpPropertyDataProvider):
+    name = "myvendor"
+    search_path = "properties/search"        # from THEIR documentation
+    capabilities = (Capability.SEARCH, Capability.PROPERTY, Capability.COMPS)
+
+    def build_search_params(self, criteria): ...   # push filters server-side
+    def parse_lead(self, payload): ...             # leave unknowns blank
+
+register("myvendor", lambda settings, csv_path, comps_path, metrics:
+         MyVendor(settings, metrics))
+```
+
+Rate limiting, retry with backoff, auth headers, call counting and the funnel
+are already written. Use the documented API with your own account, honour its
+published limits, and do not scrape sites or work around CAPTCHAs,
+robots.txt, logins, paywalls or anti-bot measures.
+
+### Cost control
+
+Paid APIs bill per request, so the funnel is ordered strictly cheapest-first
+and every stage narrows what the next one sees:
+
+```
+1,000 raw leads      1 search call
+  cheap filters      free   (geography, price, type, signals, equity)
+300 leads
+  lead scoring       free   (Wave 2 rules)
+100 leads
+  property research  BILLABLE — capped by --research-limit (default 100)
+30 candidates
+  comps / valuation  BILLABLE — capped by --comps-limit (default 30)
+10 hot deals
+  skip tracing       NOT CONNECTED
+```
+
+Comps are never requested for a raw lead, and nothing is ever skip traced.
+Both are enforced in `hunt.py` and asserted by the tests. Every run prints
+what it spent:
+
+```
+PROVIDER CALLS
+  Properties searched / returned / filtered
+  Search / property-detail / owner / distress / comp / skip-trace calls
+  API errors
+  Estimated API calls
+  FUNNEL — survivors at each stage
+```
+
+### The local database
+
+`wholesale_engine/data/leads.db` (SQLite, stdlib only, git-ignored) remembers
+what has been seen. Identity is the **normalized address + city + state +
+ZIP** — the same key the Wave 2 deduplicator uses, so within-run and
+across-run duplicate detection agree. Unit numbers are preserved: `#1` and
+`#2` are two properties.
+
+Statuses: `NEW` · `RESEARCHED` · `HOT` · `CONTACT` · `UNDER_CONTRACT` ·
+`PASSED` · `DEAD`. `first_seen` never moves, and a status you set by hand
+survives the next sighting.
+
+### Change detection
+
+A property that reappears is not news. A property that reappears cheaper is:
+
+```
+77 Sabal Palm Way:
+  PRICE DROP: $119,000 -> $99,000 (-$20,000, 17%)
+  DEAL SCORE: 84 -> 88
+  PRIORITY +26
+```
+
+Detected: price drops and increases, new distress signals, new vacancy,
+foreclosure and tax-delinquency changes, new estimated value, new repair
+estimate, and score movement. Changes raise a lead's **working priority**
+only — never its lead score or deal score, which stay exactly what the scoring
+rules say. Known-to-unknown is not a change: a source that stopped reporting a
+fact has not told you the fact went away.
+
+### Outputs
+
+| File | Contents |
+| --- | --- |
+| `daily_leads.csv` | everything the hunt touched, best first |
+| `hot_leads.csv` | analyzed, HOT/STRONG lead score, decision GO |
+| `deals_to_review.csv` | analyzed and worth a look, not a green light |
+| `rejected_leads.csv` | filtered or below the gates, with the reason |
+| `daily_leads.json` | the same rows plus the run's provider-call counts |
+
+Every row separates lead score from deal score, carries three confidence
+readings (data, ARV, comp), and keeps the fee quantities apart: target fee,
+potential fee, fee at asking, deal cushion, MAO, recommended offer.
+
+CSV and JSON are fully functional. Google Sheets is a declared adapter that
+raises rather than silently doing nothing — a silent success would be worse
+than an error.
+
+### Still not connected
+
+| Capability | Status |
+| --- | --- |
+| Skip tracing | interface only. No provider, no phone number or email ever generated. |
+| Google Sheets / CRM | adapter seam only. Needs a service account. |
+| Live property data | needs a vendor chosen from its own API documentation. |
 
 Two rules keep this safe as it grows:
 

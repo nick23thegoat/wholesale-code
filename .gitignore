@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Wholesale engine — local lead database and generated reports
+wholesale_engine/data/leads.db
+wholesale_engine/data/leads.db-journal
