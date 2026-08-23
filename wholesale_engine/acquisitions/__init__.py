@@ -1,0 +1,130 @@
+"""Wave 5 — the acquisitions workflow.
+
+Everything that happens after a lead becomes worth pursuing::
+
+    HOT LEAD -> CONTACT -> OUTREACH -> OFFER -> FOLLOW-UP
+             -> UNDER CONTRACT -> BUYER / ASSIGNMENT -> CLOSED
+
+Nothing here communicates with anyone. Calls, texts and emails are *logged*,
+never sent, and no skip-trace vendor is connected — the only provider that
+returns contact details is a mock whose output is stamped as fictional test
+data everywhere it appears.
+"""
+
+from __future__ import annotations
+
+from .contact_priority import (
+    ACQUISITION_WEIGHTS,
+    ContactPriority,
+    ContactPriorityEngine,
+    NextAction,
+)
+from .models import (
+    Assignment,
+    AssignmentStatus,
+    Buyer,
+    Channel,
+    Contact,
+    Contract,
+    ContractStatus,
+    Direction,
+    Offer,
+    OfferStatus,
+    Outcome,
+    OutreachActivity,
+    PhoneType,
+    PROVENANCE_CALCULATED,
+    PROVENANCE_LABELS,
+    PROVENANCE_SOURCE,
+    PROVENANCE_UNKNOWN,
+    PROVENANCE_UNVERIFIED,
+    PROVENANCE_USER,
+    format_phone,
+    normalize_email,
+    normalize_phone,
+)
+from .pipeline import (
+    ACQUISITION_STATUSES,
+    ACTIVE_STATUSES,
+    CLOSED_STATUSES,
+    CONTRACTED_STATUSES,
+    LEGACY_STATUS_ALIASES,
+    STATUS_DESCRIPTIONS,
+    STATUS_ORDER,
+    describe_status,
+    is_active,
+    is_closed,
+    is_valid_status,
+    normalize_status,
+)
+from .skip_trace import (
+    SKIP_TRACE_PROVIDERS,
+    MockSkipTraceProvider,
+    SkipTraceNotConfigured,
+    SkipTraceProvider,
+    SkipTraceResult,
+    UnconfiguredSkipTraceProvider,
+    get_skip_trace_provider,
+)
+from .store import AcquisitionStore
+from .workflow import (
+    AcquisitionWorkflow,
+    Dashboard,
+    DailyItem,
+    FollowUp,
+    QueueEntry,
+)
+
+__all__ = [
+    "ACQUISITION_STATUSES",
+    "ACQUISITION_WEIGHTS",
+    "ACTIVE_STATUSES",
+    "AcquisitionStore",
+    "AcquisitionWorkflow",
+    "Assignment",
+    "AssignmentStatus",
+    "Buyer",
+    "CLOSED_STATUSES",
+    "CONTRACTED_STATUSES",
+    "Channel",
+    "Contact",
+    "ContactPriority",
+    "ContactPriorityEngine",
+    "Contract",
+    "ContractStatus",
+    "DailyItem",
+    "Dashboard",
+    "Direction",
+    "FollowUp",
+    "LEGACY_STATUS_ALIASES",
+    "MockSkipTraceProvider",
+    "NextAction",
+    "Offer",
+    "OfferStatus",
+    "Outcome",
+    "OutreachActivity",
+    "PROVENANCE_CALCULATED",
+    "PROVENANCE_LABELS",
+    "PROVENANCE_SOURCE",
+    "PROVENANCE_UNKNOWN",
+    "PROVENANCE_UNVERIFIED",
+    "PROVENANCE_USER",
+    "PhoneType",
+    "QueueEntry",
+    "SKIP_TRACE_PROVIDERS",
+    "STATUS_DESCRIPTIONS",
+    "STATUS_ORDER",
+    "SkipTraceNotConfigured",
+    "SkipTraceProvider",
+    "SkipTraceResult",
+    "UnconfiguredSkipTraceProvider",
+    "describe_status",
+    "format_phone",
+    "get_skip_trace_provider",
+    "is_active",
+    "is_closed",
+    "is_valid_status",
+    "normalize_email",
+    "normalize_phone",
+    "normalize_status",
+]

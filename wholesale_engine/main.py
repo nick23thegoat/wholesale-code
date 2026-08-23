@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import date
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 if __package__ in (None, ""):  # allow `python wholesale_engine/main.py`
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -38,6 +39,21 @@ from wholesale_engine.lead_hunter import (  # noqa: E402
     run_from_csv as run_lead_hunter,
     with_overrides,
 )
+from wholesale_engine.acquisitions import (  # noqa: E402
+    AcquisitionWorkflow,
+    Assignment,
+    AssignmentStatus,
+    Buyer,
+    Channel,
+    Contract,
+    ContractStatus,
+    Direction,
+    OfferStatus,
+    Outcome,
+    SkipTraceNotConfigured,
+    get_skip_trace_provider,
+)
+from wholesale_engine.formatting import money  # noqa: E402
 from wholesale_engine.hunt import HuntBudget, run_hunt  # noqa: E402
 from wholesale_engine.outputs import CsvAdapter, JsonAdapter, publish_all  # noqa: E402
 from wholesale_engine.models.results import AnalysisResult  # noqa: E402
@@ -61,12 +77,41 @@ from wholesale_engine.reports.deal_tables import (  # noqa: E402
     render_deal_table,
     render_watchlist,
 )
+from wholesale_engine.reports.acquisition_exports import (  # noqa: E402
+    ASSIGNMENT_COLUMNS,
+    BUYER_COLUMNS,
+    CONTACT_COLUMNS,
+    CONTRACT_COLUMNS,
+    OFFER_COLUMNS,
+    OUTREACH_COLUMNS,
+    PIPELINE_COLUMNS,
+    assignment_rows,
+    buyer_rows,
+    contact_rows,
+    contract_rows,
+    offer_rows,
+    outreach_rows,
+    pipeline_rows,
+)
+from wholesale_engine.reports.acquisitions import (  # noqa: E402
+    FOLLOW_UP_COLUMNS,
+    follow_up_rows,
+    render_contact_queue,
+    render_daily,
+    render_dashboard,
+    render_follow_ups,
+)
+from wholesale_engine.reports.deal_room import render_deal_room  # noqa: E402
 from wholesale_engine.reports.dossier import render_dossier  # noqa: E402
 from wholesale_engine.storage import (  # noqa: E402
     ACTIVE_STATUSES,
     DEFAULT_DB_PATH,
     LEAD_STATUSES,
     SORT_KEYS,
+    STATUS_ASSIGNED,
+    STATUS_BUYER_SEARCH,
+    STATUS_CONTACT_READY,
+    STATUS_UNDER_CONTRACT,
     LeadStore,
     SearchQuery,
 )
@@ -266,10 +311,129 @@ def build_parser() -> argparse.ArgumentParser:
         "--activity", action="store_true", help="show the full activity log and exit",
     )
 
+    acquisition = parser.add_argument_group("acquisitions workflow (Wave 5)")
+    acquisition.add_argument(
+        "--contact-queue", action="store_true",
+        help="who to work next, ranked by acquisition priority",
+    )
+    acquisition.add_argument(
+        "--follow-ups", action="store_true",
+        help="scheduled follow-ups: overdue, today, upcoming",
+    )
+    acquisition.add_argument(
+        "--dashboard", action="store_true",
+        help="pipeline counts and projected (not earned) economics",
+    )
+    acquisition.add_argument(
+        "--daily", action="store_true",
+        help="the prioritized daily acquisitions plan",
+    )
+    acquisition.add_argument(
+        "--deal-room", metavar="PROPERTY_ID",
+        help="the complete deal summary for one property",
+    )
+    acquisition.add_argument(
+        "--skip-trace", action="store_true",
+        help="run the configured skip-trace provider against --property (or the queue)",
+    )
+    acquisition.add_argument(
+        "--skip-trace-provider", default="none",
+        help="skip-trace provider: none (default) or mock (FICTIONAL TEST DATA)",
+    )
+    for flag, channel in (
+        ("--log-call", "CALL"),
+        ("--log-text", "TEXT"),
+        ("--log-email", "EMAIL"),
+        ("--log-voicemail", "VOICEMAIL"),
+        ("--log-mail", "MAIL"),
+    ):
+        acquisition.add_argument(
+            flag, action="store_true",
+            help=f"log a {channel.lower()} against --property (nothing is sent)",
+        )
+    acquisition.add_argument(
+        "--log-note", action="store_true",
+        help="log a contact note against --property without a channel",
+    )
+    acquisition.add_argument(
+        "--outcome",
+        help="outcome of the logged attempt: NO_ANSWER, LEFT_VOICEMAIL, CONNECTED, "
+             "INTERESTED, NOT_INTERESTED, CALL_BACK, WANTS_OFFER, OFFER_SENT, "
+             "NEGOTIATING, DEAD",
+    )
+    acquisition.add_argument(
+        "--follow-up", metavar="YYYY-MM-DD", help="schedule the next follow-up",
+    )
+    acquisition.add_argument(
+        "--follow-up-reason", default="", help="why the follow-up is scheduled",
+    )
+    acquisition.add_argument(
+        "--inbound", action="store_true", help="the seller contacted you, not the other way",
+    )
+    acquisition.add_argument(
+        "--make-offer", type=float, metavar="AMOUNT",
+        help="record an offer on --property (warns above MAO, never blocks)",
+    )
+    acquisition.add_argument(
+        "--offer-status", default="SENT",
+        help="offer status: DRAFT, SENT, COUNTERED, ACCEPTED, REJECTED, EXPIRED, WITHDRAWN",
+    )
+    acquisition.add_argument(
+        "--counter", type=float, metavar="AMOUNT",
+        help="record the seller's counter on --property",
+    )
+    acquisition.add_argument(
+        "--contract", action="store_true", help="record or update a contract on --property",
+    )
+    acquisition.add_argument("--purchase-price", type=float, help="contract purchase price")
+    acquisition.add_argument("--closing-date", metavar="YYYY-MM-DD", help="contract closing date")
+    acquisition.add_argument(
+        "--inspection-deadline", metavar="YYYY-MM-DD", help="inspection deadline",
+    )
+    acquisition.add_argument("--earnest-money", type=float, help="earnest money deposit")
+    acquisition.add_argument(
+        "--assignment-allowed", choices=("yes", "no"),
+        help="whether the contract as signed permits assignment",
+    )
+    acquisition.add_argument(
+        "--contract-status", default=None,
+        help="PENDING, INSPECTION, CLEAR_TO_CLOSE, CLOSED, CANCELLED",
+    )
+    acquisition.add_argument("--add-buyer", metavar="NAME", help="add or update an end buyer")
+    acquisition.add_argument("--buyer-company", default="", help="buyer company")
+    acquisition.add_argument("--buyer-email", default=None, help="buyer email")
+    acquisition.add_argument("--buyer-phone", default=None, help="buyer phone")
+    acquisition.add_argument("--buyer-states", default=None, help="buyer's states, comma separated")
+    acquisition.add_argument("--buyer-types", default=None, help="buyer's property types")
+    acquisition.add_argument("--buyer-min", type=float, default=None, help="buyer minimum price")
+    acquisition.add_argument("--buyer-max", type=float, default=None, help="buyer maximum price")
+    acquisition.add_argument("--buyers", action="store_true", help="list the buyer database")
+    acquisition.add_argument(
+        "--assign", metavar="BUYER", help="record an assignment of --property to a buyer",
+    )
+    acquisition.add_argument(
+        "--assignment-price", type=float, help="what the end buyer pays",
+    )
+    acquisition.add_argument(
+        "--assignment-status", default=None,
+        help="BUYER_SEARCH, BUYER_INTERESTED, BUYER_OFFER, ASSIGNMENT_SIGNED, CLOSED, FAILED",
+    )
+
     export = parser.add_argument_group("export (Wave 4)")
     export.add_argument("--export-hot", action="store_true", help="export hot leads")
     export.add_argument("--export-top-deals", action="store_true", help="export top deals")
     export.add_argument("--export-watchlist", action="store_true", help="export the watchlist")
+    export.add_argument("--export-contacts", action="store_true", help="export contacts")
+    export.add_argument("--export-outreach", action="store_true", help="export outreach history")
+    export.add_argument("--export-follow-ups", action="store_true", help="export follow-ups")
+    export.add_argument("--export-offers", action="store_true", help="export offers")
+    export.add_argument("--export-contracts", action="store_true", help="export contracts")
+    export.add_argument("--export-buyers", action="store_true", help="export buyers")
+    export.add_argument("--export-assignments", action="store_true", help="export assignments")
+    export.add_argument(
+        "--export-pipeline", action="store_true",
+        help="export the full acquisition pipeline, one row per property",
+    )
     export.add_argument(
         "--format", default="both", choices=("csv", "json", "both"),
         help="export format (default: both)",
@@ -709,6 +873,503 @@ def _live_analysis(args: argparse.Namespace, stored, config: EngineConfig):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Wave 5 — acquisitions
+# ---------------------------------------------------------------------------
+
+#: CLI flag -> outreach channel.
+LOG_CHANNELS = {
+    "log_call": "CALL",
+    "log_text": "TEXT",
+    "log_email": "EMAIL",
+    "log_voicemail": "VOICEMAIL",
+    "log_mail": "MAIL",
+    "log_note": "OTHER",
+}
+
+
+def _parse_date(raw: Optional[str], label: str) -> Optional[date]:
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw.strip())
+    except ValueError:
+        raise ValueError(f"{label} must be YYYY-MM-DD, got '{raw}'")
+
+
+def _acquisition_export(
+    args: argparse.Namespace, rows, columns, label: str
+) -> List[Path]:
+    directory = args.out_dir or DEFAULT_OUTPUT_DIR
+    adapters: List[Any] = []
+    if args.format in ("csv", "both"):
+        adapters.append(CsvAdapter(directory))
+    if args.format in ("json", "both"):
+        adapters.append(JsonAdapter(directory, meta={"export": label, "count": len(rows)}))
+    return publish_all(adapters, rows, columns, label)
+
+
+def run_acquisitions_cli(args: argparse.Namespace, config: EngineConfig) -> int:
+    """Every Wave 5 command: queue, follow-ups, dashboard, daily, deal room,
+    outreach logging, offers, contracts, buyers, assignments and exports."""
+    store = open_store(args)
+    workflow = AcquisitionWorkflow(store, config=config)
+    acquisitions = workflow.store
+    exit_code = 0
+    printed = False
+    exports: List[Path] = []
+
+    try:
+        today = date.today()
+
+        # --- actions on one property ---------------------------------
+        target = args.property or args.deal_room
+        if target:
+            code, acted = _acquisition_actions(args, workflow, target, config)
+            if code:
+                return code
+            printed = printed or acted
+
+        # --- skip trace ------------------------------------------------
+        if args.skip_trace:
+            printed = _run_skip_trace(args, workflow) or printed
+
+        # --- buyers ----------------------------------------------------
+        if args.add_buyer:
+            buyer = acquisitions.save_buyer(
+                Buyer(
+                    name=args.add_buyer,
+                    company=args.buyer_company,
+                    email=args.buyer_email,
+                    phone=args.buyer_phone,
+                    preferred_states=_split(args.buyer_states) or [],
+                    property_types=_split(args.buyer_types) or [],
+                    min_price=args.buyer_min,
+                    max_price=args.buyer_max,
+                )
+            )
+            if not args.quiet:
+                print(f"Buyer saved: {buyer.name} ({buyer.price_range()}, "
+                      f"{', '.join(buyer.preferred_states) or 'any state'})")
+                printed = True
+
+        if args.buyers and not args.quiet:
+            print(render_buyers(acquisitions.all_buyers()))
+            printed = True
+
+        # --- screens ---------------------------------------------------
+        if args.deal_room:
+            printed = _render_deal_room(args, workflow, config) or printed
+
+        if args.contact_queue or args.export_contacts:
+            entries = workflow.queue_entries(limit=args.limit, today=today)
+            if args.contact_queue and not args.quiet:
+                print(render_contact_queue(entries, config.target_wholesale_fee))
+                printed = True
+            if args.export_contacts:
+                exports += _acquisition_export(
+                    args, contact_rows(acquisitions.all_contacts()),
+                    CONTACT_COLUMNS, "contacts",
+                )
+
+        if args.follow_ups or args.export_follow_ups:
+            buckets = workflow.follow_ups_by_bucket(today)
+            if args.follow_ups and not args.quiet:
+                print(render_follow_ups(buckets))
+                printed = True
+            if args.export_follow_ups:
+                ordered = buckets["OVERDUE"] + buckets["TODAY"] + buckets["UPCOMING"]
+                exports += _acquisition_export(
+                    args, follow_up_rows(ordered), FOLLOW_UP_COLUMNS, "follow_ups",
+                )
+
+        if args.dashboard and not args.quiet:
+            print(render_dashboard(workflow.dashboard(today)))
+            printed = True
+
+        if args.daily and not args.quiet:
+            print(render_daily(workflow.daily_plan(today), today))
+            printed = True
+
+        # --- remaining exports -----------------------------------------
+        for flag, rows_fn, columns, label in (
+            ("export_outreach", lambda: outreach_rows(acquisitions.all_outreach()),
+             OUTREACH_COLUMNS, "outreach"),
+            ("export_offers", lambda: offer_rows(acquisitions.all_offers()),
+             OFFER_COLUMNS, "offers"),
+            ("export_contracts", lambda: contract_rows(acquisitions.all_contracts()),
+             CONTRACT_COLUMNS, "contracts"),
+            ("export_buyers", lambda: buyer_rows(acquisitions.all_buyers()),
+             BUYER_COLUMNS, "buyers"),
+            ("export_assignments", lambda: assignment_rows(acquisitions.all_assignments()),
+             ASSIGNMENT_COLUMNS, "assignments"),
+        ):
+            if getattr(args, flag, False):
+                exports += _acquisition_export(args, rows_fn(), columns, label)
+
+        if args.export_pipeline:
+            entries = workflow.queue_entries(include_closed=True, today=today)
+            exports += _acquisition_export(
+                args,
+                pipeline_rows(entries, acquisitions, config.target_wholesale_fee),
+                PIPELINE_COLUMNS, "acquisition_pipeline",
+            )
+
+        if exports and not args.quiet:
+            print()
+            for path in exports:
+                print(f"exported -> {path}")
+            printed = True
+
+        if not printed and not args.quiet:
+            print("Nothing to show. Run --hunt first to populate the lead database.")
+        return exit_code
+    finally:
+        store.close()
+
+
+def _acquisition_actions(
+    args: argparse.Namespace,
+    workflow: "AcquisitionWorkflow",
+    property_id: str,
+    config: EngineConfig,
+) -> Tuple[int, bool]:
+    """Status moves, outreach logging, offers, contracts and assignments.
+
+    Returns ``(exit_code, acted)``. ``acted`` says whether anything was written
+    or printed, so the caller does not follow a completed action with
+    "nothing to show".
+    """
+    acted = False
+    row = workflow.leads.find_one(property_id)
+    if row is None:
+        print(
+            f"No stored property matches '{property_id}'. Run --hunt first, or try "
+            "part of the address.",
+            file=sys.stderr,
+        )
+        return 1, False
+
+    try:
+        follow_up = _parse_date(args.follow_up, "--follow-up")
+        closing = _parse_date(args.closing_date, "--closing-date")
+        inspection = _parse_date(args.inspection_deadline, "--inspection-deadline")
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2, acted
+
+    # --- outreach ------------------------------------------------------
+    channel_flag = next((f for f in LOG_CHANNELS if getattr(args, f, False)), None)
+    if channel_flag:
+        try:
+            outcome = Outcome.parse(args.outcome) if args.outcome else None
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2, acted
+        activity, messages = workflow.log_outreach(
+            row.dedupe_key,
+            channel=Channel.parse(LOG_CHANNELS[channel_flag]),
+            outcome=outcome,
+            notes=args.note or "",
+            follow_up=follow_up,
+            direction=Direction.INBOUND if args.inbound else Direction.OUTBOUND,
+        )
+        if not args.quiet and activity is not None:
+            print(
+                f"Logged {activity.channel}"
+                + (f" — {activity.outcome}" if activity.outcome else "")
+                + f" on {row.address or row.dedupe_key}. Nothing was sent."
+            )
+            for message in messages:
+                print(f"  {message}")
+        acted = True
+    elif follow_up and not args.make_offer:
+        workflow.store.set_follow_up(
+            row.dedupe_key, follow_up, args.follow_up_reason or "scheduled manually"
+        )
+        workflow.leads.log_activity(
+            row.lead_row_id, "follow_up_scheduled",
+            f"follow-up {follow_up.isoformat()}"
+            + (f": {args.follow_up_reason}" if args.follow_up_reason else ""),
+            row.dedupe_key,
+        )
+        if not args.quiet:
+            print(f"Follow-up set for {follow_up.isoformat()}.")
+        acted = True
+
+    # --- offers --------------------------------------------------------
+    if args.make_offer is not None:
+        try:
+            status = OfferStatus.parse(args.offer_status)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2, acted
+        offer, warnings = workflow.build_offer(
+            row.dedupe_key, args.make_offer, notes=args.note or "", status=status
+        )
+        if not args.quiet and offer is not None:
+            print(render_offer(offer, config))
+            for warning in warnings:
+                print(f"  !! {warning}")
+        acted = True
+
+    if args.counter is not None:
+        offer, messages = workflow.record_counter(
+            row.dedupe_key, args.counter, notes=args.note or ""
+        )
+        if not args.quiet:
+            for message in messages:
+                print(message)
+            if offer is not None:
+                print(render_negotiation(offer, config))
+        acted = True
+
+    # --- contract ------------------------------------------------------
+    if args.contract or args.contract_status:
+        existing = workflow.store.contract_for(row.dedupe_key) or Contract(
+            property_id=row.dedupe_key
+        )
+        if args.purchase_price is not None:
+            existing.purchase_price = args.purchase_price
+        if existing.contract_date is None:
+            existing.contract_date = date.today()
+        if inspection:
+            existing.inspection_deadline = inspection
+        if closing:
+            existing.closing_date = closing
+        if args.earnest_money is not None:
+            existing.earnest_money = args.earnest_money
+        if args.assignment_allowed:
+            existing.assignment_allowed = args.assignment_allowed == "yes"
+        if args.contract_status:
+            try:
+                existing.status = ContractStatus.parse(args.contract_status)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2, acted
+        if args.note:
+            existing.notes = f"{existing.notes}\n{args.note}".strip()
+        workflow.store.save_contract(existing)
+        workflow.set_status(row.dedupe_key, STATUS_UNDER_CONTRACT, "contract recorded")
+        if not args.quiet:
+            print(
+                f"Contract recorded: {existing.status} at "
+                f"{money(existing.purchase_price)}. Tracking only — this engine "
+                "drafts no documents and gives no legal advice."
+            )
+        acted = True
+
+    # --- assignment ----------------------------------------------------
+    if args.assign or args.assignment_price is not None or args.assignment_status:
+        existing = workflow.store.assignment_for(row.dedupe_key) or Assignment(
+            property_id=row.dedupe_key
+        )
+        if args.assign:
+            existing.buyer_name = args.assign
+            match = next(
+                (b for b in workflow.store.all_buyers() if b.name == args.assign), None
+            )
+            if match:
+                existing.buyer_id = match.buyer_id
+        if args.assignment_price is not None:
+            existing.assignment_price = args.assignment_price
+        contract = workflow.store.contract_for(row.dedupe_key)
+        if existing.purchase_price is None:
+            existing.purchase_price = (
+                contract.purchase_price if contract else row.recommended_offer
+            )
+        if args.assignment_status:
+            try:
+                existing.status = AssignmentStatus.parse(args.assignment_status)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2, acted
+        elif existing.assignment_price is not None and existing.buyer_name:
+            existing.status = AssignmentStatus.ASSIGNMENT_SIGNED
+            existing.assignment_date = existing.assignment_date or date.today()
+        workflow.store.save_assignment(existing)
+        workflow.set_status(
+            row.dedupe_key,
+            STATUS_ASSIGNED if existing.status is AssignmentStatus.ASSIGNMENT_SIGNED
+            else STATUS_BUYER_SEARCH,
+            "assignment updated",
+        )
+        if not args.quiet:
+            fee = existing.gross_assignment_fee
+            print(
+                f"Assignment {existing.status}"
+                + (f" to {existing.buyer_name}" if existing.buyer_name else "")
+                + (f", gross fee {money(fee)}" if fee is not None else "")
+            )
+        acted = True
+    return 0, acted
+
+
+def _run_skip_trace(args: argparse.Namespace, workflow: "AcquisitionWorkflow") -> bool:
+    """Run the configured skip-trace provider. Default provider refuses."""
+    try:
+        provider = get_skip_trace_provider(args.skip_trace_provider)
+    except SkipTraceNotConfigured as exc:
+        print(str(exc), file=sys.stderr)
+        return False
+
+    if args.property:
+        row = workflow.leads.find_one(args.property)
+        targets = [row] if row else []
+    else:
+        targets = [e.row for e in workflow.skip_trace_candidates(limit=args.limit or 10)]
+
+    if not targets:
+        if not args.quiet:
+            print("Nothing to skip trace.")
+        return True
+
+    if provider.is_test_provider and not args.quiet:
+        print(
+            "WARNING: the mock skip-trace provider returns FICTIONAL TEST DATA. "
+            "Reserved 555-01xx numbers and .invalid addresses. Do not dial or "
+            "email anything it produces."
+        )
+
+    found = 0
+    for row in targets:
+        try:
+            result = provider.skip_trace(
+                property_id=row.dedupe_key,
+                owner_name=None,
+                address=row.address,
+                city=row.city,
+                state=row.state,
+                zip_code=row.zip_code,
+            )
+        except SkipTraceNotConfigured as exc:
+            print(str(exc), file=sys.stderr)
+            return False
+        contact = workflow.store.save_contact(result.to_contact(row.dedupe_key))
+        workflow.leads.log_activity(
+            row.lead_row_id, "skip_trace_run",
+            f"{provider.name}: "
+            + ("contact found" if contact.is_reachable else "no contact found")
+            + (" (TEST DATA)" if contact.is_test_data else ""),
+            row.dedupe_key,
+        )
+        if contact.is_reachable:
+            found += 1
+            workflow.set_status(row.dedupe_key, STATUS_CONTACT_READY, "skip trace returned contact")
+        if not args.quiet:
+            print(
+                f"  {row.address or row.dedupe_key:<34}"
+                f"{contact.display_phone():<18}{contact.display_email():<28}"
+                f"{contact.provenance}"
+            )
+    if not args.quiet:
+        print(
+            f"{found} of {len(targets)} lookup(s) returned a contact "
+            f"({provider.lookups} lookup(s) billed at ${provider.cost_per_lookup:.2f} each)."
+        )
+    return True
+
+
+def _render_deal_room(
+    args: argparse.Namespace, workflow: "AcquisitionWorkflow", config: EngineConfig
+) -> bool:
+    row = workflow.leads.find_one(args.deal_room)
+    if row is None:
+        print(f"No stored property matches '{args.deal_room}'.", file=sys.stderr)
+        return False
+    if args.quiet:
+        return True
+
+    acquisitions = workflow.store
+    contact = acquisitions.best_contact(row.dedupe_key)
+    entries = [e for e in workflow.queue_entries(include_closed=True)
+               if e.row.dedupe_key == row.dedupe_key]
+    acquisition_priority = entries[0].priority if entries else None
+
+    live = _live_analysis(args, row, config)
+    analysis = research = priority = None
+    if live is not None:
+        result, research, priority = live
+        analysis = result.analysis
+
+    print(
+        render_deal_room(
+            row=row,
+            contact=contact,
+            outreach=acquisitions.outreach_for(row.dedupe_key),
+            offers=acquisitions.offers_for(row.dedupe_key),
+            contract=acquisitions.contract_for(row.dedupe_key),
+            assignment=acquisitions.assignment_for(row.dedupe_key),
+            research=research,
+            priority=priority,
+            acquisition_priority=acquisition_priority,
+            analysis=analysis,
+            notes=workflow.leads.notes(row.lead_row_id),
+            config=config,
+        )
+    )
+    return True
+
+
+def render_offer(offer, config: EngineConfig) -> str:
+    """The offer as recorded, against the underwriting behind it."""
+    lines = [
+        "-" * 78,
+        f"OFFER RECORDED — {money(offer.offer_amount)}  [{offer.offer_status}]",
+        "-" * 78,
+        f"  {'Asking price:':<28}{money(offer.current_price)}",
+        f"  {'ARV:':<28}{money(offer.arv)}",
+        f"  {'Repairs:':<28}{money(offer.repairs)}",
+        f"  {'End-buyer ceiling:':<28}{money(offer.end_buyer_ceiling)}",
+        f"  {'MAO:':<28}{money(offer.mao)}",
+        f"  {'Your offer:':<28}{money(offer.offer_amount)}",
+        f"  {'Distance to MAO:':<28}{money(offer.distance_to_mao)}",
+        f"  {'Target wholesale fee:':<28}{money(offer.target_wholesale_fee)}",
+        f"  {'Potential wholesale fee:':<28}{money(offer.potential_wholesale_fee)}",
+    ]
+    gap = offer.distance_to_target_fee
+    if gap is not None:
+        lines.append(
+            f"  {'Distance to target fee:':<28}{money(gap)}"
+            + ("  (below target — a label, not a rejection)" if gap < 0 else "")
+        )
+    return "\n".join(lines)
+
+
+def render_negotiation(offer, config: EngineConfig) -> str:
+    """Where the negotiation stands after a counter."""
+    return "\n".join([
+        "-" * 78,
+        "NEGOTIATION",
+        "-" * 78,
+        f"  {'Your offer:':<28}{money(offer.offer_amount)}",
+        f"  {'Seller counter:':<28}{money(offer.seller_counter)}",
+        f"  {'Current price:':<28}{money(offer.current_proposed_price)}",
+        f"  {'MAO:':<28}{money(offer.mao)}",
+        f"  {'Distance to MAO:':<28}{money(offer.distance_to_mao)}",
+        f"  {'Potential wholesale fee:':<28}{money(offer.fee_at_current_price)}",
+        f"  {'Target wholesale fee:':<28}{money(offer.target_wholesale_fee)}",
+        f"  {'Distance to target fee:':<28}{money(offer.distance_to_target_fee)}",
+    ])
+
+
+def render_buyers(buyers) -> str:
+    lines = ["=" * 110, "BUYER LIST", "=" * 110,
+             f"{'NAME':<24}{'COMPANY':<24}{'STATES':<14}{'TYPES':<24}{'PRICE RANGE':<20}",
+             "-" * 110]
+    if not buyers:
+        lines.append("  No buyers yet. Add one with --add-buyer NAME.")
+    for buyer in buyers:
+        lines.append(
+            f"{buyer.name[:23]:<24}{buyer.company[:23]:<24}"
+            f"{', '.join(buyer.preferred_states)[:13] or 'any':<14}"
+            f"{', '.join(buyer.property_types)[:23] or 'any':<24}"
+            f"{buyer.price_range():<20}"
+        )
+    lines.append("=" * 110)
+    return "\n".join(lines)
+
+
 def render_all(results: List[AnalysisResult], config: EngineConfig) -> str:
     return "\n\n".join(render_result(result, config) for result in results)
 
@@ -720,6 +1381,19 @@ def run(argv: Optional[List[str]] = None) -> int:
         print(describe_sources())
         return 0
 
+    acquisition_command = bool(
+        args.contact_queue or args.follow_ups or args.dashboard or args.daily
+        or args.deal_room or args.skip_trace or args.buyers or args.add_buyer
+        or args.make_offer is not None or args.counter is not None
+        or args.contract or args.contract_status or args.assign
+        or args.assignment_price is not None or args.assignment_status
+        or any(getattr(args, flag, False) for flag in LOG_CHANNELS)
+        or args.export_contacts or args.export_outreach or args.export_follow_ups
+        or args.export_offers or args.export_contracts or args.export_buyers
+        or args.export_assignments or args.export_pipeline
+        or (args.property and args.follow_up)
+    )
+
     database_command = bool(
         args.search or args.top_deals or args.hot_leads or args.watchlist
         or args.property or args.activity or args.export_hot
@@ -727,12 +1401,15 @@ def run(argv: Optional[List[str]] = None) -> int:
     )
 
     hunting = bool(args.leads or args.sample_leads)
-    if not (args.sample or args.csv or args.json or hunting or args.hunt or database_command):
+    if not (
+        args.sample or args.csv or args.json or hunting or args.hunt
+        or database_command or acquisition_command
+    ):
         build_parser().print_help()
         print(
             "\nNothing to analyze. Start with:  --sample  (Wave 1),  "
             "--sample-leads  (Wave 2),  --hunt --source csv  (Wave 4),  "
-            "then  --top-deals  /  --hot-leads  /  --property <id>",
+            "then  --dashboard  /  --daily  /  --contact-queue  /  --deal-room <id>",
             file=sys.stderr,
         )
         return 2
@@ -748,11 +1425,16 @@ def run(argv: Optional[List[str]] = None) -> int:
         min_viable_wholesale_fee=args.viable_fee,
     )
 
+    if acquisition_command and not args.hunt:
+        return run_acquisitions_cli(args, config)
+
     if database_command and not args.hunt:
         return run_database_cli(args, config)
 
     if args.hunt:
         code = run_hunt_cli(args, config)
+        if code == 0 and acquisition_command:
+            return run_acquisitions_cli(args, config)
         if code == 0 and database_command:
             return run_database_cli(args, config)
         return code

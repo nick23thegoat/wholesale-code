@@ -42,6 +42,7 @@ wholesale_engine/
 ├── settings.py                 credentials from the environment / .env (WAVE 4)
 ├── hunt.py                     the cost-controlled funnel (WAVE 4)
 ├── priority.py                 the PRIORITY SCORE — a third, separate ranking (WAVE 4)
+├── pipeline_status.py          the 16 acquisition statuses (WAVE 5)
 ├── requirements.txt            stdlib only; pytest optional
 ├── README.md
 ├── models/
@@ -80,6 +81,12 @@ wholesale_engine/
 │   ├── distress.py             normalized distress signals with provenance
 │   ├── equity.py               equity vs. a value-minus-asking spread
 │   └── models.py               PropertyResearch — the normalized result
+├── acquisitions/               WAVE 5
+│   ├── models.py               Contact, OutreachActivity, Offer, Contract, Buyer, Assignment
+│   ├── skip_trace.py           the interface + a mock that is obviously fake
+│   ├── contact_priority.py     what to physically do next, per lead
+│   ├── workflow.py             queue, follow-ups, offers, dashboard, daily plan
+│   └── store.py                SQLite for the acquisition side
 ├── storage/                    WAVE 4
 │   ├── database.py             SQLite store, watchlist, notes, activity, search
 │   └── changes.py              price drops, ARV/DOM moves, new distress
@@ -100,9 +107,12 @@ wholesale_engine/
     ├── hunt_report.py          the four Wave 4 CSVs + JSON + console summary
     ├── dossier.py              the property research screen (--property)
     ├── deal_tables.py          --top-deals / --hot-leads / --search tables
+    ├── acquisitions.py         contact queue, follow-ups, dashboard, daily plan
+    ├── deal_room.py            the complete deal summary (--deal-room)
+    ├── acquisition_exports.py  contacts/outreach/offers/contracts/buyers/pipeline
     └── output/                 generated files land here
 .env.example                    credential placeholders (copy to .env)
-tests/                          517 unit + end-to-end tests
+tests/                          672 unit + end-to-end tests
 ```
 
 The layering is strict, and it is what makes each wave additive:
@@ -774,8 +784,15 @@ pytest tests -v                              # if pytest is installed
   research services, and the equity engine's refusal to call a spread equity.
 - `tests/test_priority.py` — the PRIORITY SCORE: every band, every component,
   and the rule that a below-target fee is never disqualifying.
-- `tests/test_watchlist.py` — the ten statuses, notes, the activity log, every
-  search filter, the ranked tables, the dossier, and the new CLI commands.
+- `tests/test_watchlist.py` — the pipeline statuses, notes, the activity log,
+  every search filter, the ranked tables, the dossier, and the CLI commands.
+- `tests/test_acquisitions.py` — the contact model's refusal to invent a phone
+  number, the skip-trace interface and its fictional mock, contact priority,
+  outreach, offers, counters, contracts, buyers, assignments, the dashboard
+  and the daily plan.
+- `tests/test_acquisitions_cli.py` — every Wave 5 command end to end, including
+  a scan asserting no module anywhere generates a phone-shaped literal outside
+  the reserved 555 range.
 
 `Wave1RegressionTests` re-asserts the original Wave 1 sample decisions, so a
 later change that altered underwriting behaviour would fail the suite.
@@ -1214,7 +1231,209 @@ making things up.
 
 ---
 
-## 13. Disclaimer
+## 13. Wave 5 — the acquisitions workflow
+
+Waves 1–4 decide whether a property is worth pursuing. Wave 5 is what happens
+after that: a person, a conversation, a number, a contract, a buyer.
+
+```
+HOT LEAD -> CONTACT -> OUTREACH LOG -> OFFER -> FOLLOW-UP
+         -> UNDER CONTRACT -> BUYER / ASSIGNMENT -> CLOSED
+```
+
+**Nothing in this engine sends anything.** Calls, texts and emails are logged
+by you after the fact. No skip-trace vendor is connected. No CRM, no Sheets,
+no mass anything. Those are Wave 6.
+
+### The pipeline
+
+Sixteen statuses, in order:
+
+```
+NEW · RESEARCHING · HOT · CONTACT_READY · CONTACTED · CONVERSATION
+FOLLOW_UP · OFFER_PREPARING · OFFER_SENT · NEGOTIATING · UNDER_CONTRACT
+BUYER_SEARCH · ASSIGNED · CLOSED        ·        DEAD · PASSED
+```
+
+Nothing enforces the order — deals skip steps, go backwards and die at every
+stage. Every move is recorded with where it came from and why:
+
+```bash
+python3 -m wholesale_engine.main --property LH-011 \
+    --set-status CONTACT_READY --reason "skip trace returned a phone"
+```
+
+The Wave 4 names (`WATCH`, `RESEARCHED`, `CONTACT`) still resolve, so an
+existing database keeps working.
+
+### Contacts — never invented
+
+A `Contact` starts entirely empty and stays that way until a source fills it
+in. `normalize_phone` tidies a number that was supplied and returns `None` for
+anything implausible; there is no code path anywhere that *builds* one. Unknown
+renders as `NONE`, exports as `null`, and never as a blank string dressed up as
+data.
+
+Every contact carries a provenance label: `SOURCE-PROVIDED`, `CALCULATED`,
+`USER-PROVIDED`, `UNVERIFIED` or `UNKNOWN`.
+
+### Skip tracing — interface only
+
+| Provider | Status |
+| --- | --- |
+| `none` (default) | refuses, and explains what connecting one actually requires |
+| `mock` | **FICTIONAL TEST DATA ONLY** |
+
+```bash
+python3 -m wholesale_engine.main --skip-trace --skip-trace-provider mock --limit 5
+```
+
+The mock exists so the workflow can be exercised without a vendor. Everything
+it returns is unmistakably unusable:
+
+* phone numbers in `555-01xx` — reserved for fiction, never assignable
+* emails on `.invalid` — a reserved TLD that can never resolve
+* every record stamped `is_test_data`, rendered as `TEST DATA` on every screen
+  and carried as a column in the exports
+
+One lookup in five returns nothing, because that is what really happens and the
+queue has to handle it.
+
+Connecting a real vendor needs an account, and — before you dial anyone —
+consent tracking, DNC scrubbing and a suppression list. The engine will not do
+that for you and does not pretend to.
+
+### Acquisition priority — the fourth score
+
+| Score | Question |
+| --- | --- |
+| **LEAD SCORE** | is this worth a phone call? |
+| **DEAL SCORE** | is this worth a contract? |
+| **PRIORITY SCORE** | what do I work on first? |
+| **ACQUISITION PRIORITY** | what is my next physical action, right now? |
+
+The difference is contact availability. A brilliant deal with no phone number
+is not a call — it is a skip trace:
+
+```
+HOT + high deal score + phone     ->  CALL NOW
+HOT + no phone                    ->  SKIP TRACE
+strong deal + unverified ARV      ->  RESEARCH FIRST
+weak deal + no phone              ->  RESEARCH FIRST (not worth tracing yet)
+seller countered                  ->  RESPOND TO COUNTER
+```
+
+### Commands
+
+```bash
+# The four screens
+python3 -m wholesale_engine.main --dashboard        # where everything stands
+python3 -m wholesale_engine.main --daily            # what to do, in order
+python3 -m wholesale_engine.main --contact-queue    # who to call
+python3 -m wholesale_engine.main --follow-ups       # what you promised
+python3 -m wholesale_engine.main --deal-room LH-011 # one deal, end to end
+
+# Log outreach (nothing is sent; a phone number is not required)
+python3 -m wholesale_engine.main --property LH-011 \
+    --log-call --outcome CONNECTED \
+    --note "Seller is motivated and wants to discuss price." \
+    --follow-up 2026-08-24
+
+# --log-text  --log-email  --log-voicemail  --log-mail  --log-note
+# Outcomes: NO_ANSWER LEFT_VOICEMAIL CONNECTED INTERESTED NOT_INTERESTED
+#           CALL_BACK WANTS_OFFER OFFER_SENT NEGOTIATING DEAD
+
+# Offers and negotiation
+python3 -m wholesale_engine.main --property LH-011 --make-offer 59500
+python3 -m wholesale_engine.main --property LH-011 --counter 71000
+
+# Contract tracking (tracking only — no documents, no legal advice)
+python3 -m wholesale_engine.main --property LH-011 --contract \
+    --purchase-price 59500 --closing-date 2026-09-30 \
+    --inspection-deadline 2026-09-05 --earnest-money 2500 \
+    --assignment-allowed yes
+
+# Buyers and assignment
+python3 -m wholesale_engine.main --add-buyer "BUYER NAME" \
+    --buyer-states MO,KS --buyer-min 40000 --buyer-max 250000
+python3 -m wholesale_engine.main --buyers
+python3 -m wholesale_engine.main --property LH-011 \
+    --assign "BUYER NAME" --assignment-price 77500
+
+# Exports (CSV, JSON, or both)
+python3 -m wholesale_engine.main --export-contacts --export-outreach \
+    --export-follow-ups --export-offers --export-contracts \
+    --export-buyers --export-assignments --export-pipeline
+```
+
+### Offers warn, they never block
+
+An offer above MAO is recorded exactly as entered, with the arithmetic spelled
+out:
+
+```
+OFFER RECORDED — $70,000  [SENT]
+  MAO:                        $67,000
+  Distance to MAO:            -$3,000
+  Target wholesale fee:       $18,000
+  Potential wholesale fee:    $15,000
+  Distance to target fee:     -$3,000  (below target — a label, not a rejection)
+
+  !! OFFER EXCEEDS MAO: $70,000 is $3,000 above the MAO of $67,000. At that
+     price the deal leaves $15,000 of assignment fee. Recorded as entered —
+     this is a warning, not a block.
+  !! BELOW TARGET WHOLESALE FEE: $15,000 against a $18,000 target, short by
+     $3,000. A label, not a rejection — a deal below target can still be worth
+     doing.
+```
+
+**$18,000 stays a target.** Nothing in Wave 5 refuses an offer, downgrades a
+lead, or drops a deal out of the queue for coming in under it.
+
+### Negotiation
+
+A counter is measured at the price actually on the table:
+
+```
+  Your offer:                 $70,000
+  Seller counter:             $68,000
+  Current price:              $68,000
+  MAO:                        $67,000
+  Distance to MAO:            -$1,000
+  Potential wholesale fee:    $17,000
+  Distance to target fee:     -$1,000
+```
+
+### The dashboard
+
+Pipeline counts, work outstanding, and projected economics — labelled as
+projected, because that is what they are:
+
+```
+  Total pipeline value        $1,182,500   (sum of recommended offers on live deals)
+  Total potential fees          $198,400   (if every live deal closed at today's numbers)
+```
+
+> These are PROJECTED figures from unverified inputs, not income. Most leads
+> never close, fees move when the ARV or the rehab moves, and nothing here is
+> guaranteed.
+
+### The daily plan
+
+```
+1. OVERDUE FOLLOW-UPS
+  1. FOLLOW UP           145 Cedar Hollow Lane      3 day(s) overdue — callback
+2. HOT LEADS WITH CONTACT
+  2. CALL                1820 Chestnut Grove Court  Phone on file, deal scores 89
+3. NEEDS SKIP TRACE
+  3. SKIP TRACE          77 Sabal Palm Way          No phone, email or mailing address
+5. SELLER COUNTERS
+  4. RESPOND TO COUNTER  905 Pecan Street           countered at $148,000
+```
+
+---
+
+## 14. Disclaimer
 
 This is a screening tool, not investment, legal, or appraisal advice. It works
 only from the data you give it, and no deal it scores is guaranteed profitable.

@@ -26,60 +26,48 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from ..lead_hunter.models import Lead
 from ..lead_hunter.normalizer import normalize_lead
 
-# --- the deal watchlist ----------------------------------------------------
+# --- the acquisition pipeline ----------------------------------------------
 #
-# One lead moves through these in roughly this order. Nothing enforces the
-# order — deals skip steps and go backwards — but every move is recorded, so
-# the history answers "what happened to that one?" months later.
-#
-#   NEW -> WATCH -> HOT -> CONTACT -> OFFER_SENT -> UNDER_CONTRACT -> ASSIGNED
-#                                  -> PASSED / DEAD at any point
+# The statuses themselves live in wholesale_engine.acquisitions.pipeline, which
+# is the single definition of the workflow. They are re-exported here because
+# the store is where they are written and read.
 
-STATUS_NEW = "NEW"
-STATUS_WATCH = "WATCH"
-STATUS_RESEARCHED = "RESEARCHED"
-STATUS_HOT = "HOT"
-STATUS_CONTACT = "CONTACT"
-STATUS_OFFER_SENT = "OFFER_SENT"
-STATUS_UNDER_CONTRACT = "UNDER_CONTRACT"
-STATUS_ASSIGNED = "ASSIGNED"
-STATUS_CLOSED = "CLOSED"
-STATUS_PASSED = "PASSED"
-STATUS_DEAD = "DEAD"
-
-LEAD_STATUSES = (
-    STATUS_NEW,
-    STATUS_WATCH,
-    STATUS_RESEARCHED,
-    STATUS_HOT,
-    STATUS_CONTACT,
-    STATUS_OFFER_SENT,
-    STATUS_UNDER_CONTRACT,
+from ..pipeline_status import (  # noqa: E402
+    ACQUISITION_STATUSES,
+    ACTIVE_STATUSES,
+    CLOSED_STATUSES,
+    LEGACY_STATUS_ALIASES,
     STATUS_ASSIGNED,
+    STATUS_BUYER_SEARCH,
     STATUS_CLOSED,
-    STATUS_PASSED,
+    STATUS_CONTACT_READY,
+    STATUS_CONTACTED,
+    STATUS_CONVERSATION,
     STATUS_DEAD,
+    STATUS_FOLLOW_UP,
+    STATUS_HOT,
+    STATUS_NEGOTIATING,
+    STATUS_NEW,
+    STATUS_OFFER_PREPARING,
+    STATUS_OFFER_SENT,
+    STATUS_ORDER,
+    STATUS_PASSED,
+    STATUS_RESEARCHING,
+    STATUS_UNDER_CONTRACT,
+    normalize_status,
 )
+
+#: Backwards-compatible alias. Wave 4 called this the watchlist.
+LEAD_STATUSES = ACQUISITION_STATUSES
+
+#: Wave 4 names kept as importable constants so older callers still resolve.
+STATUS_WATCH = STATUS_RESEARCHING
+STATUS_RESEARCHED = STATUS_RESEARCHING
+STATUS_CONTACT = STATUS_CONTACTED
 
 #: The analyzer's green light, compared exactly. "GO" is a substring of
 #: "NEGOTIATE", so substring matching on a decision is always a bug.
 DECISION_GO = "🔥 GO"
-
-#: Statuses that mean "stop working this lead".
-CLOSED_STATUSES = (STATUS_PASSED, STATUS_DEAD, STATUS_CLOSED)
-
-#: Statuses that mean "this is live and being worked".
-ACTIVE_STATUSES = (
-    STATUS_WATCH,
-    STATUS_HOT,
-    STATUS_CONTACT,
-    STATUS_OFFER_SENT,
-    STATUS_UNDER_CONTRACT,
-)
-
-#: The default status ordering used when sorting a watchlist for display:
-#: furthest along first.
-STATUS_ORDER = {name: index for index, name in enumerate(LEAD_STATUSES)}
 
 
 # --- activity types --------------------------------------------------------
@@ -93,6 +81,16 @@ ACTIVITY_NOTE_ADDED = "note_added"
 ACTIVITY_RESEARCH_COMPLETED = "research_completed"
 ACTIVITY_OFFER_CALCULATED = "offer_calculated"
 
+# --- Wave 5 acquisition activities ---
+ACTIVITY_CONTACT_ADDED = "contact_added"
+ACTIVITY_SKIP_TRACE_RUN = "skip_trace_run"
+ACTIVITY_OUTREACH_LOGGED = "outreach_logged"
+ACTIVITY_FOLLOW_UP_SCHEDULED = "follow_up_scheduled"
+ACTIVITY_OFFER_MADE = "offer_made"
+ACTIVITY_COUNTER_RECEIVED = "counter_received"
+ACTIVITY_CONTRACT_RECORDED = "contract_recorded"
+ACTIVITY_ASSIGNMENT_UPDATED = "assignment_updated"
+
 ACTIVITY_TYPES = (
     ACTIVITY_LEAD_CREATED,
     ACTIVITY_LEAD_UPDATED,
@@ -102,6 +100,14 @@ ACTIVITY_TYPES = (
     ACTIVITY_NOTE_ADDED,
     ACTIVITY_RESEARCH_COMPLETED,
     ACTIVITY_OFFER_CALCULATED,
+    ACTIVITY_CONTACT_ADDED,
+    ACTIVITY_SKIP_TRACE_RUN,
+    ACTIVITY_OUTREACH_LOGGED,
+    ACTIVITY_FOLLOW_UP_SCHEDULED,
+    ACTIVITY_OFFER_MADE,
+    ACTIVITY_COUNTER_RECEIVED,
+    ACTIVITY_CONTRACT_RECORDED,
+    ACTIVITY_ASSIGNMENT_UPDATED,
 )
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "leads.db"
@@ -764,9 +770,10 @@ class LeadStore:
         so the dossier can show the whole path months later. A no-op move
         (same status) is not recorded — it is not a change.
         """
-        if status not in LEAD_STATUSES:
+        status = normalize_status(status)
+        if status not in ACQUISITION_STATUSES:
             raise ValueError(
-                f"unknown status '{status}'. Valid: {', '.join(LEAD_STATUSES)}"
+                f"unknown status '{status}'. Valid: {', '.join(ACQUISITION_STATUSES)}"
             )
         row = self.connection.execute(
             "SELECT status FROM leads WHERE id = ?", (lead_row_id,)

@@ -72,14 +72,25 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(stored.times_seen, 1)
         self.assertTrue(stored.is_new)
 
-    def test_the_watchlist_statuses_all_exist(self):
+    def test_the_pipeline_statuses_all_exist(self):
+        # Wave 5 replaced the short watchlist with the full acquisition
+        # pipeline. The Wave 4 names still resolve as aliases.
         self.assertEqual(
             set(LEAD_STATUSES),
             {
-                "NEW", "WATCH", "RESEARCHED", "HOT", "CONTACT", "OFFER_SENT",
-                "UNDER_CONTRACT", "ASSIGNED", "CLOSED", "PASSED", "DEAD",
+                "NEW", "RESEARCHING", "HOT", "CONTACT_READY", "CONTACTED",
+                "CONVERSATION", "FOLLOW_UP", "OFFER_PREPARING", "OFFER_SENT",
+                "NEGOTIATING", "UNDER_CONTRACT", "BUYER_SEARCH", "ASSIGNED",
+                "CLOSED", "DEAD", "PASSED",
             },
         )
+
+    def test_the_wave_4_status_names_still_resolve(self):
+        from wholesale_engine.storage import normalize_status
+
+        self.assertEqual(normalize_status("WATCH"), "RESEARCHING")
+        self.assertEqual(normalize_status("RESEARCHED"), "RESEARCHING")
+        self.assertEqual(normalize_status("CONTACT"), "CONTACTED")
 
     def test_an_unknown_status_is_refused(self):
         stored = self.store.upsert_lead(lead())

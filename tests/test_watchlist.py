@@ -27,8 +27,13 @@ from wholesale_engine.storage import (
     LeadStore,
     SearchQuery,
     STATUS_ASSIGNED,
-    STATUS_CONTACT,
+    STATUS_CONTACTED,
+    STATUS_CONTACT_READY,
+    STATUS_CONVERSATION,
     STATUS_DEAD,
+    STATUS_NEGOTIATING,
+    STATUS_RESEARCHING,
+    STATUS_BUYER_SEARCH,
     STATUS_HOT,
     STATUS_OFFER_SENT,
     STATUS_PASSED,
@@ -68,15 +73,19 @@ class WatchlistTests(unittest.TestCase):
 
     def test_the_full_status_vocabulary(self):
         for name in (
-            "NEW", "WATCH", "HOT", "CONTACT", "OFFER_SENT",
-            "UNDER_CONTRACT", "ASSIGNED", "CLOSED", "PASSED", "DEAD",
+            "NEW", "RESEARCHING", "HOT", "CONTACT_READY", "CONTACTED",
+            "CONVERSATION", "FOLLOW_UP", "OFFER_PREPARING", "OFFER_SENT",
+            "NEGOTIATING", "UNDER_CONTRACT", "BUYER_SEARCH", "ASSIGNED",
+            "CLOSED", "DEAD", "PASSED",
         ):
             self.assertIn(name, LEAD_STATUSES)
 
     def test_a_lead_can_walk_the_whole_pipeline(self):
         path = [
-            STATUS_WATCH, STATUS_HOT, STATUS_CONTACT,
-            STATUS_OFFER_SENT, STATUS_UNDER_CONTRACT, STATUS_ASSIGNED,
+            STATUS_RESEARCHING, STATUS_HOT, STATUS_CONTACT_READY,
+            STATUS_CONTACTED, STATUS_CONVERSATION, STATUS_OFFER_SENT,
+            STATUS_NEGOTIATING, STATUS_UNDER_CONTRACT, STATUS_BUYER_SEARCH,
+            STATUS_ASSIGNED,
         ]
         for status in path:
             self.store.set_status(self.row.lead_row_id, status)
@@ -105,7 +114,7 @@ class WatchlistTests(unittest.TestCase):
             self.store.set_status(self.row.lead_row_id, "MAYBE")
 
     def test_the_watchlist_shows_only_active_leads(self):
-        self.store.set_status(self.row.lead_row_id, STATUS_CONTACT)
+        self.store.set_status(self.row.lead_row_id, STATUS_CONTACTED)
         other = self.store.upsert_lead(lead(lead_id="L2", address="9 Elm St"))
         self.store.set_status(other.lead_row_id, STATUS_PASSED)
         addresses = [r.address for r in self.store.watchlist()]
