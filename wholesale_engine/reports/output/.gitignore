@@ -1,4 +1,6 @@
-# Generated analysis output lands here.
+# Generated analysis output lands here. Every file in this directory is
+# rebuilt by a command, so none of it belongs in version control.
 *.csv
 *.txt
+*.json
 !.gitignore
