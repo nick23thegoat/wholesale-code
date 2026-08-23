@@ -18,8 +18,9 @@ from typing import Dict, Mapping, Optional, Tuple
 #: MAO = (ARV x ARV_PERCENTAGE) - repairs - wholesale fee
 ARV_PERCENTAGE: float = 0.70
 
-#: Default MINIMUM TARGET assignment fee. This is the fee you are trying to
-#: earn on every deal — not a fee the engine assumes you will get.
+#: Default TARGET assignment fee. This is the fee you are aiming for on every
+#: deal. It is deliberately NOT a minimum: a deal that supports less is
+#: labelled BELOW TARGET, not rejected. The deal score decides.
 TARGET_WHOLESALE_FEE: float = 18_000.0
 
 #: Backwards-compatible alias for the module-level constant.
@@ -57,14 +58,22 @@ class EngineConfig:
     arv_percentage: float = ARV_PERCENTAGE
     #: The fee you are TARGETING. MAO reserves exactly this much for you, so a
     #: purchase at MAO yields exactly this fee and no more.
+    #:
+    #: TARGET, NOT MINIMUM. Nothing in the engine rejects or downgrades a deal
+    #: for coming in under it. A shortfall is labelled BELOW TARGET, raised as
+    #: a risk flag, and fed continuously into the ``wholesale_spread`` score
+    #: component — where a $13,000 fee scores lower than an $18,000 one but
+    #: still competes on the strength of the rest of the deal.
     target_wholesale_fee: float = TARGET_WHOLESALE_FEE
-    #: A deal whose achievable fee falls under this is BELOW TARGET.
-    min_acceptable_spread: float = TARGET_WHOLESALE_FEE
-    #: Extra room demanded ON TOP of the target fee before a deal counts as
-    #: MEETS TARGET. Zero means "the target fee is the bar", which is the
-    #: standard reading. Set it to the target fee itself if you want a deal to
-    #: clear the fee twice over before it can be called a GO.
-    min_cushion_above_target: float = 0.0
+    #: The fee below which the engine stops calling a deal a green light.
+    #:
+    #: This is an ECONOMIC VIABILITY floor, not the target. It exists because
+    #: "GO" has to mean something — a deal supporting $2,800 is not a go at any
+    #: score — but it sits well under the target on purpose, so a $13,000
+    #: assignment on an otherwise strong deal still reaches GO carrying a
+    #: BELOW TARGET flag. Set it to 0.0 (``--min-fee 0``) to remove the floor
+    #: entirely and let the deal score decide alone.
+    min_viable_wholesale_fee: float = 10_000.0
 
     # --- offer construction ----------------------------------------------
     #: The engine never recommends paying full MAO; this is the floor haircut.
@@ -159,11 +168,6 @@ class EngineConfig:
     def wholesale_fee(self) -> float:
         """Backwards-compatible alias for :attr:`target_wholesale_fee`."""
         return self.target_wholesale_fee
-
-    @property
-    def required_wholesale_fee(self) -> float:
-        """The fee a deal must actually support to count as MEETS TARGET."""
-        return self.target_wholesale_fee + self.min_cushion_above_target
 
     def weight(self, name: str) -> float:
         return self.score_weights.get(name, 0.0)

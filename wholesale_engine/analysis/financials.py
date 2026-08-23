@@ -103,12 +103,17 @@ def buyer_margin(
 def classify_wholesale_fee(
     fee: Optional[float], config: EngineConfig = DEFAULT_CONFIG
 ) -> "WholesaleFeeStatus":
-    """MEETS TARGET / BELOW TARGET / UNKNOWN for an achievable fee."""
+    """MEETS TARGET / BELOW TARGET / UNKNOWN for an achievable fee.
+
+    A label, not a verdict. BELOW TARGET says the fee is smaller than you were
+    aiming for; it does not say the deal is bad, and no caller may treat it as
+    a rejection.
+    """
     from ..models.enums import WholesaleFeeStatus
 
     if fee is None:
         return WholesaleFeeStatus.UNKNOWN
-    if fee >= config.required_wholesale_fee:
+    if fee >= config.target_wholesale_fee:
         return WholesaleFeeStatus.MEETS_TARGET
     return WholesaleFeeStatus.BELOW_TARGET
 

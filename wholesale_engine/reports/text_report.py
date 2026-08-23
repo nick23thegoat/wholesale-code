@@ -48,6 +48,18 @@ def _wrap(text: str, indent: str = "  ") -> str:
     )
 
 
+
+def _binding_label(lead, fin) -> str:
+    """Name the price the headline fee was measured at."""
+    if fin.binding_wholesale_fee is None:
+        return "no price on the table"
+    if (
+        fin.wholesale_fee_at_asking is not None
+        and fin.binding_wholesale_fee == fin.wholesale_fee_at_asking
+    ):
+        return f"at asking {money(lead.asking_price)}"
+    return f"at your offer {money(fin.recommended_offer)}"
+
 def _kv(label: str, value: str, indent: str = "  ", label_width: int = 27) -> str:
     """One aligned ``label: value`` line."""
     return f"{indent}{label:<{label_width}}{value}"
@@ -166,17 +178,15 @@ def render_result(result: AnalysisResult, config: EngineConfig = DEFAULT_CONFIG)
 
     lines.append("")
     lines.append("  WHOLESALE FEE")
-    lines.append(_kv("Target Wholesale Fee:", money(config.target_wholesale_fee), indent="    ", label_width=28))
     lines.append(
-        _kv("Potential Wholesale Fee:", money(fin.binding_wholesale_fee), indent="    ", label_width=28)
+        _kv("Target Wholesale Fee:", money(config.target_wholesale_fee), indent="    ", label_width=28)
     )
-    lines.append(
-        _kv("Wholesale Fee Status:", str(fin.wholesale_fee_status), indent="    ", label_width=28)
-    )
+    # Every fee figure names the price it was measured at. A fee without its
+    # price is the number that caused the confusion this section fixes.
     if fin.potential_wholesale_fee is not None:
         lines.append(
             _kv(
-                "  at recommended offer:",
+                f"  at your offer {money(fin.recommended_offer)}:",
                 money(fin.potential_wholesale_fee),
                 indent="    ",
                 label_width=28,
@@ -184,15 +194,34 @@ def render_result(result: AnalysisResult, config: EngineConfig = DEFAULT_CONFIG)
         )
     if fin.wholesale_fee_at_asking is not None:
         lines.append(
-            _kv("  at asking price:", money(fin.wholesale_fee_at_asking), indent="    ", label_width=28)
+            _kv(
+                f"  at asking {money(lead.asking_price)}:",
+                money(fin.wholesale_fee_at_asking),
+                indent="    ",
+                label_width=28,
+            )
         )
+    lines.append(
+        _kv(
+            "Potential Wholesale Fee:",
+            f"{money(fin.binding_wholesale_fee)} ({_binding_label(lead, fin)})",
+            indent="    ",
+            label_width=28,
+        )
+    )
+    lines.append(
+        _kv("Wholesale Fee Status:", str(fin.wholesale_fee_status), indent="    ", label_width=28)
+    )
     if fin.buyer_margin is not None:
-        lines.append(_kv("Buyer Margin at Assignment:", money(fin.buyer_margin), indent="    ", label_width=28))
+        lines.append(
+            _kv("Buyer Margin at Assignment:", money(fin.buyer_margin), indent="    ", label_width=28)
+        )
     lines.append(
         _wrap(
-            "The fee is judged at the price actually on the table: the asking price when "
-            "the seller is asking more than you plan to offer, otherwise the recommended "
-            "offer. An offer the seller has not accepted cannot qualify a deal.",
+            "The headline fee is measured at the price actually on the table: the asking "
+            "price when the seller wants more than you plan to offer, otherwise your own "
+            "offer. The target is a target — BELOW TARGET is a label and a scoring "
+            "penalty, never an automatic rejection.",
             indent="      ",
         )
     )

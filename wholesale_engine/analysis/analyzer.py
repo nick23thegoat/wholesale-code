@@ -270,17 +270,18 @@ def _deal_risk_flags(
             if at_asking
             else f"at the recommended offer of {money(summary.recommended_offer)}"
         )
-        shortfall = config.required_wholesale_fee - (fee or 0.0)
+        shortfall = config.target_wholesale_fee - (fee or 0.0)
         flags.append(
             RiskFlag(
-                Severity.HIGH,
+                Severity.MEDIUM,
                 "below_target_wholesale_fee",
                 (
                     f"BELOW TARGET WHOLESALE FEE: this deal supports about {money(fee)} "
                     f"{where}, against your target of "
-                    f"{money(config.required_wholesale_fee)} — a shortfall of "
-                    f"{money(shortfall)}. The seller has to come down roughly that much "
-                    "before the fee is there."
+                    f"{money(config.target_wholesale_fee)} — a shortfall of "
+                    f"{money(shortfall)}. That is a label, not a rejection: the deal "
+                    f"score above still decides. Coming down {money(shortfall)} on price "
+                    "would put the fee back on target."
                 ),
             )
         )
@@ -679,36 +680,47 @@ def _decide(
 
     meets_fee_target = summary.wholesale_fee_status is WholesaleFeeStatus.MEETS_TARGET
 
-    if score.total >= config.go_score_threshold and gap >= 0 and spread_ok and meets_fee_target:
+    # The fee target is a TARGET. It never gates the decision on its own — it
+    # is reported, flagged when short, and scored continuously by the
+    # ``wholesale_spread`` component. The deal score is the decision mechanism.
+    #
+    # The only fee-based gate is the viability floor, which sits far below the
+    # target: a deal supporting $13,000 can still be a GO, one supporting
+    # $2,800 cannot be a GO at any score.
+    fee_ok = (
+        summary.binding_wholesale_fee is not None
+        and summary.binding_wholesale_fee >= config.min_viable_wholesale_fee
+    )
+    price_position = (
+        f"At {money(asking)} the seller is already asking {money(gap)} below the MAO "
+        f"of {money(summary.mao)}"
+        if gap >= 0
+        else (
+            f"At {money(asking)} the seller is asking {money(abs(gap))} above the MAO of "
+            f"{money(summary.mao)}, which trims the fee rather than killing the deal"
+        )
+    )
+
+    if score.total >= config.go_score_threshold and spread_ok and fee_ok:
         return (
             Decision.GO,
             (
-                f"Go. At {money(asking)} the seller is already asking {money(gap)} below the MAO "
-                f"of {money(summary.mao)}, the ARV basis is {arv.confidence}, and the deal scores "
-                f"{score.total:.0f}/100 ({score.classification}). The economics clear your "
-                f"target: even if the seller will not move off {money(asking)}, the deal "
+                f"Go. {price_position}, the ARV basis is {arv.confidence}, and the deal scores "
+                f"{score.total:.0f}/100 ({score.classification}). "
+                + (
+                    "The economics clear your target: even"
+                    if meets_fee_target
+                    else "The fee comes in under your target, which the score already "
+                    "accounts for: even"
+                )
+                + f" if the seller will not move off {money(asking)}, the deal "
                 f"supports about {money(summary.wholesale_fee_at_asking)} of assignment fee "
-                f"against a {money(config.required_wholesale_fee)} target. Open at "
+                f"against a {money(config.target_wholesale_fee)} target. Open at "
                 f"{money(summary.recommended_offer)} — below MAO, to protect against the rehab "
                 f"and value risks listed above — where the fee would be about "
                 f"{money(summary.potential_wholesale_fee)}, and assign around "
                 f"{money(summary.assignment_price)}. Nothing here is guaranteed: verify the "
                 "rehab with a walkthrough and confirm title before you tie it up."
-            ),
-        )
-
-    if score.total >= config.go_score_threshold and gap >= 0 and spread_ok and not meets_fee_target:
-        # Everything else is in place, but the fee is not. That is a negotiation,
-        # not a green light.
-        return (
-            Decision.NEGOTIATE,
-            (
-                f"Negotiate — the economics do not clear your fee target. The deal scores "
-                f"{score.total:.0f}/100 ({score.classification}), but at "
-                f"{money(summary.binding_wholesale_fee)} the achievable assignment fee is "
-                f"short of your {money(config.required_wholesale_fee)} target. You need the "
-                f"purchase price at or below {money(summary.mao)} for the fee to be there. "
-                "Work the price, or pass."
             ),
         )
 
@@ -740,7 +752,7 @@ def _decide(
                 f"asking {money(asking)} sits {money(abs(gap))} above the MAO of "
                 f"{money(summary.mao)}. At the asking price the assignment fee would be about "
                 f"{money(summary.wholesale_fee_at_asking)} against your "
-                f"{money(config.required_wholesale_fee)} target, so the price has to move "
+                f"{money(config.target_wholesale_fee)} target, so the price has to move "
                 f"before this is a deal. Your opening number is "
                 f"{money(summary.recommended_offer)} and {money(summary.mao)} is your walk-away "
                 "ceiling — show the seller the repair math rather than arguing about price."
@@ -749,7 +761,7 @@ def _decide(
 
     fee_note = (
         f"At the binding price the fee comes to about {money(summary.binding_wholesale_fee)} "
-        f"against your {money(config.required_wholesale_fee)} target"
+        f"against your {money(config.target_wholesale_fee)} target"
         + ("." if meets_fee_target else " — short of target, so price is the lever.")
     )
     return (

@@ -86,12 +86,12 @@ def _score_wholesale_spread(
     if spread >= 0:
         note = (
             f"At the asking price the deal supports about {money(achievable)} of "
-            f"assignment fee, against a {money(config.required_wholesale_fee)} target."
+            f"assignment fee, against a {money(config.target_wholesale_fee)} target."
         )
     else:
         note = (
             f"Asking is {money(abs(spread))} above MAO, leaving about {money(achievable)} "
-            f"of fee against a {money(config.required_wholesale_fee)} target — the price "
+            f"of fee against a {money(config.target_wholesale_fee)} target — the price "
             "has to come down."
         )
     return ScoreComponent("Wholesale economics", weight, score, note)

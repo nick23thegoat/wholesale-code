@@ -11,6 +11,7 @@ The distinction these tests exist to protect:
 
 from __future__ import annotations
 
+import dataclasses
 import csv
 import tempfile
 import unittest
@@ -239,18 +240,14 @@ class WholesaleFeeStatusTests(unittest.TestCase):
         result = analyze_property(deal(asking=150_000), config)
         self.assertIs(result.financials.wholesale_fee_status, WholesaleFeeStatus.BELOW_TARGET)
 
-    def test_an_extra_cushion_requirement_can_be_demanded(self):
-        # Opt-in stricter rule: clear the fee AND the same again in cushion.
-        strict = EngineConfig(min_cushion_above_target=TARGET)
-        self.assertEqual(strict.required_wholesale_fee, TARGET * 2)
-        # Fee at this asking price is $30,000: clears $18,000, not $36,000.
-        relaxed_result = analyze_property(deal(asking=150_000))
-        strict_result = analyze_property(deal(asking=150_000), strict)
+    def test_the_target_is_the_only_bar_no_hidden_cushion_requirement(self):
+        # There must be no second knob quietly raising the bar above the target.
+        fields = {f.name for f in dataclasses.fields(EngineConfig)}
+        self.assertNotIn("min_cushion_above_target", fields)
+        self.assertFalse(hasattr(DEFAULT_CONFIG, "required_wholesale_fee"))
+        # A fee one dollar over the target is MEETS TARGET, full stop.
         self.assertIs(
-            relaxed_result.financials.wholesale_fee_status, WholesaleFeeStatus.MEETS_TARGET
-        )
-        self.assertIs(
-            strict_result.financials.wholesale_fee_status, WholesaleFeeStatus.BELOW_TARGET
+            fin.classify_wholesale_fee(TARGET + 1), WholesaleFeeStatus.MEETS_TARGET
         )
 
 
@@ -260,35 +257,72 @@ class WholesaleFeeStatusTests(unittest.TestCase):
 
 
 class GoRequiresEconomicsTests(unittest.TestCase):
+    """The target is a TARGET: it labels and scores, it does not gate."""
+
     def test_a_deal_clearing_the_target_can_be_a_go(self):
         result = analyze_property(deal(asking=140_000))
         self.assertIs(result.financials.wholesale_fee_status, WholesaleFeeStatus.MEETS_TARGET)
         self.assertEqual(result.decision, Decision.GO)
 
-    def test_a_deal_below_the_target_is_never_a_go(self):
-        result = analyze_property(deal(asking=175_000))
-        self.assertIs(result.financials.wholesale_fee_status, WholesaleFeeStatus.BELOW_TARGET)
-        self.assertNotEqual(result.decision, Decision.GO)
-        self.assertIn(result.decision, (Decision.NEGOTIATE, Decision.PASS))
+    def test_a_below_target_fee_can_still_be_a_go(self):
+        # The whole point of the audit: ~$13k of fee on an otherwise strong
+        # deal is a real deal, not a downgrade.
+        asking = fin.maximum_allowable_offer(300_000, 30_000) + 5_000  # fee ~= 13,000
+        result = analyze_property(deal(asking=asking))
+        financials = result.financials
+        self.assertIs(financials.wholesale_fee_status, WholesaleFeeStatus.BELOW_TARGET)
+        self.assertAlmostEqual(financials.binding_wholesale_fee, TARGET - 5_000)
+        self.assertEqual(result.decision, Decision.GO)
 
-    def test_raising_the_target_can_turn_a_go_into_a_negotiation(self):
+    def test_a_below_target_go_still_carries_the_flag(self):
+        asking = fin.maximum_allowable_offer(300_000, 30_000) + 5_000
+        result = analyze_property(deal(asking=asking))
+        self.assertEqual(result.decision, Decision.GO)
+        flag = next(f for f in result.risk_flags if f.code == "below_target_wholesale_fee")
+        self.assertIn("BELOW TARGET WHOLESALE FEE", flag.message)
+        self.assertIn("not a rejection", flag.message)
+
+    def test_a_below_target_fee_is_never_an_automatic_pass(self):
+        asking = fin.maximum_allowable_offer(300_000, 30_000) + 5_000
+        self.assertNotEqual(analyze_property(deal(asking=asking)).decision, Decision.PASS)
+
+    def test_a_fee_under_the_viability_floor_is_not_a_go(self):
+        # "GO" still has to mean something. Far below target is not a go.
+        asking = fin.maximum_allowable_offer(300_000, 30_000) + 16_000  # fee ~= 2,000
+        result = analyze_property(deal(asking=asking))
+        self.assertLess(result.financials.binding_wholesale_fee, DEFAULT_CONFIG.min_viable_wholesale_fee)
+        self.assertNotEqual(result.decision, Decision.GO)
+
+    def test_the_viability_floor_is_configurable_and_removable(self):
+        asking = fin.maximum_allowable_offer(300_000, 30_000) + 16_000
+        no_floor = EngineConfig(min_viable_wholesale_fee=0.0)
+        self.assertEqual(analyze_property(deal(asking=asking), no_floor).decision, Decision.GO)
+        strict = EngineConfig(min_viable_wholesale_fee=TARGET)
+        self.assertNotEqual(analyze_property(deal(asking=asking), strict).decision, Decision.GO)
+
+    def test_raising_the_target_does_not_by_itself_kill_a_go(self):
+        # A bigger target shrinks the MAO and the measured fee, but the target
+        # alone must not veto a decision the score supports.
         lead_args = dict(asking=140_000)
         self.assertEqual(analyze_property(deal(**lead_args)).decision, Decision.GO)
         demanding = EngineConfig(target_wholesale_fee=45_000)
         result = analyze_property(deal(**lead_args), demanding)
-        self.assertNotEqual(result.decision, Decision.GO)
+        self.assertIs(
+            result.financials.wholesale_fee_status, WholesaleFeeStatus.BELOW_TARGET
+        )
+        self.assertEqual(result.decision, Decision.GO)
 
-    def test_no_go_is_ever_issued_below_target(self):
-        # Sweep the asking price across the whole range: every GO must clear.
+    def test_every_go_clears_the_viability_floor(self):
+        # Sweep the asking price: GO may fall below TARGET, never below the floor.
+        floor = DEFAULT_CONFIG.min_viable_wholesale_fee
         for asking in range(100_000, 200_001, 5_000):
             result = analyze_property(deal(asking=asking))
             if result.decision is Decision.GO:
-                self.assertIs(
-                    result.financials.wholesale_fee_status,
-                    WholesaleFeeStatus.MEETS_TARGET,
-                    f"GO issued at asking {asking:,} without clearing the fee target",
+                self.assertGreaterEqual(
+                    result.financials.binding_wholesale_fee,
+                    floor,
+                    f"GO issued at asking {asking:,} below the viability floor",
                 )
-                self.assertGreaterEqual(result.financials.binding_wholesale_fee, TARGET)
 
     def test_the_go_explanation_states_the_achievable_fee(self):
         result = analyze_property(deal(asking=140_000))
@@ -356,14 +390,24 @@ class LeadPipelineEconomicsTests(unittest.TestCase):
         cls.report = run_from_csv(SAMPLE_LEADS, comps_path=SAMPLE_LEAD_COMPS)
         cls.by_id = {r.lead.lead_id: r for r in cls.report.results}
 
-    def test_no_lead_is_a_go_without_clearing_the_fee_target(self):
+    def test_every_go_lead_clears_the_viability_floor(self):
+        floor = DEFAULT_CONFIG.min_viable_wholesale_fee
         for result in self.report.results:
             if result.analysis is not None and result.analysis.decision is Decision.GO:
-                self.assertIs(
-                    result.analysis.financials.wholesale_fee_status,
-                    WholesaleFeeStatus.MEETS_TARGET,
+                self.assertGreaterEqual(
+                    result.analysis.financials.binding_wholesale_fee,
+                    floor,
                     result.lead.address,
                 )
+
+    def test_a_below_target_lead_can_still_be_a_go(self):
+        # 145 Cedar Hollow supports ~$14,000: under target, over the floor, and
+        # strong enough on the score to be worth doing.
+        result = self.by_id["LH-021"]
+        financials = result.analysis.financials
+        self.assertIs(financials.wholesale_fee_status, WholesaleFeeStatus.BELOW_TARGET)
+        self.assertLess(financials.binding_wholesale_fee, DEFAULT_CONFIG.target_wholesale_fee)
+        self.assertEqual(result.analysis.decision, Decision.GO)
 
     def test_a_lead_short_of_the_fee_is_flagged_and_downgraded(self):
         result = self.by_id["LH-009"]  # asking $148k against a $132.8k MAO
