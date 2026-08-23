@@ -228,3 +228,6 @@ wholesale_engine/reports/output/sheet_*.csv
 wholesale_engine/data/cache/
 wholesale_engine/data/api_usage.json
 rentcast_sample.json
+
+# The live buy box is per-deployment; the example is committed instead.
+config/buybox.json

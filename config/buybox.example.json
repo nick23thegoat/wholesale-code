@@ -1,0 +1,37 @@
+{
+  "name": "example",
+  "notes": "One request per ZIP per run. Keep this list short and good.",
+  "enabled": true,
+  "states": [
+    "FL",
+    "TX",
+    "MO"
+  ],
+  "zip_codes": [
+    "33607"
+  ],
+  "cities": [],
+  "counties": [],
+  "property_types": [
+    "single_family",
+    "duplex",
+    "triplex",
+    "fourplex"
+  ],
+  "min_beds": null,
+  "max_beds": null,
+  "min_baths": null,
+  "min_sqft": null,
+  "max_sqft": null,
+  "min_year_built": null,
+  "max_year_built": null,
+  "min_price": 0.0,
+  "max_price": 2200000.0,
+  "required_signals": [],
+  "min_signal_count": 0,
+  "min_equity": null,
+  "min_lead_score": 50,
+  "min_deal_score": 0.0,
+  "target_wholesale_fee": 18000.0,
+  "min_viable_wholesale_fee": 10000.0
+}

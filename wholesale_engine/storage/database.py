@@ -211,7 +211,51 @@ CREATE TABLE IF NOT EXISTS activities (
     created_at          TEXT NOT NULL
 );
 
+-- One row per scheduled or manual run. Gives the phone a run history and
+-- gives every decision something to hang off, so "why was this rejected?"
+-- can always be answered with "in which run, and what did it cost".
+CREATE TABLE IF NOT EXISTS runs (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at          TEXT NOT NULL,
+    finished_at         TEXT NOT NULL DEFAULT '',
+    trigger             TEXT NOT NULL DEFAULT 'manual',
+    buy_box             TEXT NOT NULL DEFAULT '',
+    provider            TEXT NOT NULL DEFAULT '',
+    mode                TEXT NOT NULL DEFAULT 'TEST',
+    status              TEXT NOT NULL DEFAULT 'RUNNING',
+    api_requests_spent  INTEGER NOT NULL DEFAULT 0,
+    cache_hits          INTEGER NOT NULL DEFAULT 0,
+    leads_seen          INTEGER NOT NULL DEFAULT 0,
+    leads_accepted      INTEGER NOT NULL DEFAULT 0,
+    leads_rejected      INTEGER NOT NULL DEFAULT 0,
+    error               TEXT NOT NULL DEFAULT '',
+    notes               TEXT NOT NULL DEFAULT ''
+);
+
+-- Why each property was accepted or rejected, and at which stage of the
+-- funnel. Written for EVERY property the run saw, including the ones that
+-- were thrown away — a rejection you cannot explain is a rejection you
+-- cannot tune the buy box against.
+CREATE TABLE IF NOT EXISTS decisions (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id              INTEGER REFERENCES runs(id) ON DELETE CASCADE,
+    lead_row_id         INTEGER REFERENCES leads(id) ON DELETE SET NULL,
+    dedupe_key          TEXT NOT NULL DEFAULT '',
+    address             TEXT NOT NULL DEFAULT '',
+    stage               TEXT NOT NULL DEFAULT '',
+    outcome             TEXT NOT NULL DEFAULT '',
+    reason              TEXT NOT NULL DEFAULT '',
+    detail              TEXT NOT NULL DEFAULT '',
+    lead_score          REAL,
+    deal_score          REAL,
+    decided_at          TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_properties_dedupe ON properties(dedupe_key);
+CREATE INDEX IF NOT EXISTS idx_decisions_run ON decisions(run_id);
+CREATE INDEX IF NOT EXISTS idx_decisions_key ON decisions(dedupe_key);
+CREATE INDEX IF NOT EXISTS idx_decisions_outcome ON decisions(outcome);
+CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
 CREATE INDEX IF NOT EXISTS idx_leads_priority ON leads(priority_score);
 CREATE INDEX IF NOT EXISTS idx_history_lead ON lead_history(lead_row_id);
