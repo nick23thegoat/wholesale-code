@@ -222,3 +222,9 @@ wholesale_engine/data/leads.db
 wholesale_engine/data/leads.db-journal
 wholesale_engine/reports/output/backups/
 wholesale_engine/reports/output/sheet_*.csv
+
+# RentCast — machine-local state. The cache holds real property data pulled
+# under your account; the ledger and sample are per-machine, not per-repo.
+wholesale_engine/data/cache/
+wholesale_engine/data/api_usage.json
+rentcast_sample.json

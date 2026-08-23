@@ -30,8 +30,11 @@ ENV_VARS = (
     "MAX_COMPS",
     "MAX_SKIP_TRACES",
     "MAX_REACH",
+    "MAX_RENTCAST",
     "MIN_PROPERTY_PRICE",
     "MAX_PROPERTY_PRICE",
+    "RENTCAST_API_KEY",
+    "RENTCAST_BASE_URL",
     "PROPERTYREACH_API_KEY",
     "PROPERTYREACH_BASE_URL",
     "PROPERTY_DATA_API_KEY",
@@ -99,6 +102,10 @@ class ProviderSettings:
     #: vendor's published root when it is not set. The key never has a default.
     propertyreach_api_key: Optional[str] = None
     propertyreach_base_url: Optional[str] = None
+    #: RentCast. Like PropertyReach, the base URL has a published default, so
+    #: only the key is genuinely required.
+    rentcast_api_key: Optional[str] = None
+    rentcast_base_url: Optional[str] = None
     public_records_api_key: Optional[str] = None
     comps_api_key: Optional[str] = None
     skip_trace_api_key: Optional[str] = None
@@ -112,6 +119,8 @@ class ProviderSettings:
             property_data_base_url=env("PROPERTY_DATA_BASE_URL"),
             propertyreach_api_key=env("PROPERTYREACH_API_KEY"),
             propertyreach_base_url=env("PROPERTYREACH_BASE_URL"),
+            rentcast_api_key=env("RENTCAST_API_KEY"),
+            rentcast_base_url=env("RENTCAST_BASE_URL"),
             public_records_api_key=env("PUBLIC_RECORDS_API_KEY"),
             comps_api_key=env("COMPS_API_KEY"),
             skip_trace_api_key=env("SKIP_TRACE_API_KEY"),
@@ -128,6 +137,11 @@ class ProviderSettings:
     def has_propertyreach(self) -> bool:
         """PropertyReach needs only a key — its base URL has a published default."""
         return bool(self.propertyreach_api_key)
+
+    @property
+    def has_rentcast(self) -> bool:
+        """RentCast needs only a key — its base URL has a published default."""
+        return bool(self.rentcast_api_key)
 
     @property
     def has_comps(self) -> bool:
@@ -157,6 +171,7 @@ class ProviderSettings:
             for name, present in (
                 ("property-data", self.has_property_data),
                 ("propertyreach", self.has_propertyreach),
+                ("rentcast", self.has_rentcast),
                 ("public-records", self.has_public_records),
                 ("comps", self.has_comps),
                 ("skip-trace", self.has_skip_trace),
