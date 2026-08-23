@@ -235,12 +235,133 @@ class MockSkipTraceProvider(SkipTraceProvider):
         return result
 
 
-#: Registry for ``--skip-trace-provider``. Only the mock is available; adding
-#: a real one means implementing SkipTraceProvider against its documentation.
+class HttpSkipTraceProvider(SkipTraceProvider):
+    """Template for a real skip-trace vendor. **NOT CONNECTED.**
+
+    The transport is finished — timeouts, retries, backoff, rate limiting and
+    credential redaction all come from :class:`SafeHttpClient`. What is
+    deliberately absent is anything that would have to be guessed:
+
+    * no endpoint path, because it comes from the vendor's documentation
+    * no request shape, because it comes from their schema
+    * no response parsing, because their field names are theirs
+    * no pricing, because inventing a rate card would be worse than saying
+      "unknown"
+
+    Before this goes live, three things that are your responsibility and not
+    the engine's: confirm the vendor's terms permit your use, put consent
+    tracking and DNC scrubbing in place, and honour the suppression list this
+    engine already maintains.
+    """
+
+    name = "http-skip-trace"
+    is_test_provider = False
+
+    #: Endpoint path, relative to SKIP_TRACE_BASE_URL. Vendor-specific.
+    search_path: str = ""
+
+    def __init__(self) -> None:
+        super().__init__()
+        import os
+
+        from ..providers.http_client import SafeHttpClient
+
+        key = os.environ.get("SKIP_TRACE_API_KEY", "").strip()
+        base = os.environ.get("SKIP_TRACE_BASE_URL", "").strip()
+        missing = [
+            name for name, value in
+            (("SKIP_TRACE_API_KEY", key), ("SKIP_TRACE_BASE_URL", base))
+            if not value
+        ]
+        if missing:
+            raise SkipTraceNotConfigured(
+                f"{self.name} is NOT CONNECTED: {', '.join(missing)} not set. "
+                "The base URL comes from your vendor's published API "
+                "documentation — this engine will not invent an endpoint."
+            )
+        if not self.search_path:
+            raise SkipTraceNotConfigured(
+                f"{self.name} has no endpoint path. This is a template: subclass "
+                "it and set search_path from your vendor's documentation, then "
+                "implement build_params and parse_result."
+            )
+        self.client = SafeHttpClient(base, key)
+
+    def build_params(self, **kwargs: Any) -> Dict[str, Any]:
+        raise NotImplementedError(
+            "build_params must be written from the vendor's API documentation."
+        )
+
+    def parse_result(self, payload: Dict[str, Any], property_id: str) -> SkipTraceResult:
+        raise NotImplementedError(
+            "parse_result must be written from the vendor's response schema. "
+            "Leave every field the vendor did not return blank."
+        )
+
+    def skip_trace(
+        self,
+        property_id: str,
+        owner_name: Optional[str] = None,
+        address: str = "",
+        city: str = "",
+        state: str = "",
+        zip_code: str = "",
+    ) -> SkipTraceResult:
+        self.lookups += 1
+        payload = self.client.request(
+            self.search_path,
+            self.build_params(
+                owner_name=owner_name, address=address, city=city,
+                state=state, zip_code=zip_code,
+            ),
+        )
+        return self.parse_result(payload, property_id)
+
+
+#: Registry for ``SKIP_TRACE_PROVIDER``. Only ``none`` and ``mock`` are usable;
+#: adding a real one means implementing the interface against its documentation.
 SKIP_TRACE_PROVIDERS = {
     "none": UnconfiguredSkipTraceProvider,
     "mock": MockSkipTraceProvider,
+    "http": HttpSkipTraceProvider,
 }
+
+
+def register_skip_trace_provider(name: str, factory: type) -> None:
+    """Register a vendor adapter under ``name`` for ``SKIP_TRACE_PROVIDER``."""
+    key = (name or "").strip().lower()
+    if not key:
+        raise ValueError("a skip-trace provider needs a name")
+    SKIP_TRACE_PROVIDERS[key] = factory
+
+
+def skip_trace_status() -> str:
+    """Which tracers exist and whether any is actually usable."""
+    import os
+
+    lines = ["SKIP-TRACE PROVIDERS", ""]
+    for name in sorted(SKIP_TRACE_PROVIDERS):
+        if name == "none":
+            state = "REFUSES — the safe default"
+        elif name == "mock":
+            state = "TEST DATA ONLY — fictional 555-01xx numbers"
+        elif os.environ.get("SKIP_TRACE_API_KEY", "").strip() and os.environ.get(
+            "SKIP_TRACE_BASE_URL", ""
+        ).strip():
+            state = "CONFIGURED — needs a vendor subclass with search_path"
+        else:
+            state = "NOT CONNECTED — needs SKIP_TRACE_API_KEY, SKIP_TRACE_BASE_URL"
+        lines.append(f"  {name:<18}{state}")
+    lines.append("")
+    lines.append(
+        "  No paid vendor ships wired in. Before connecting one: confirm the "
+        "terms permit your use, and put consent"
+    )
+    lines.append(
+        "  tracking and DNC scrubbing in place. The engine maintains the "
+        "suppression list; the rest is on you."
+    )
+    return "\n".join(lines)
 
 
 def get_skip_trace_provider(name: str = "none") -> SkipTraceProvider:
@@ -248,8 +369,8 @@ def get_skip_trace_provider(name: str = "none") -> SkipTraceProvider:
     if key not in SKIP_TRACE_PROVIDERS:
         raise SkipTraceNotConfigured(
             f"unknown skip-trace provider '{name}'. Available: "
-            f"{', '.join(SKIP_TRACE_PROVIDERS)}. No paid vendor is wired in — "
-            "adding one means reading that vendor's API documentation and "
+            f"{', '.join(sorted(SKIP_TRACE_PROVIDERS))}. No paid vendor is wired "
+            "in — adding one means reading that vendor's API documentation and "
             "meeting its compliance requirements first."
         )
     return SKIP_TRACE_PROVIDERS[key]()

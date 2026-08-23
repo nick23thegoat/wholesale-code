@@ -90,6 +90,8 @@ ACTIVITY_OFFER_MADE = "offer_made"
 ACTIVITY_COUNTER_RECEIVED = "counter_received"
 ACTIVITY_CONTRACT_RECORDED = "contract_recorded"
 ACTIVITY_ASSIGNMENT_UPDATED = "assignment_updated"
+ACTIVITY_SELLER_RESPONSE = "seller_response"
+ACTIVITY_NOTIFICATION = "notification"
 
 ACTIVITY_TYPES = (
     ACTIVITY_LEAD_CREATED,
@@ -108,6 +110,8 @@ ACTIVITY_TYPES = (
     ACTIVITY_COUNTER_RECEIVED,
     ACTIVITY_CONTRACT_RECORDED,
     ACTIVITY_ASSIGNMENT_UPDATED,
+    ACTIVITY_SELLER_RESPONSE,
+    ACTIVITY_NOTIFICATION,
 )
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "leads.db"
@@ -540,6 +544,16 @@ class LeadStore:
                p.county, p.property_type
         FROM leads l JOIN properties p ON p.id = l.property_id
     """
+
+    #: Complete queries, built once. Nothing is ever concatenated into SQL at
+    #: call time — the whole statement is a literal and the value is a
+    #: parameter, so there is no interpolation surface to get wrong.
+    _BY_LEAD_ID = (
+        _SELECT + " WHERE l.lead_id = ? ORDER BY l.last_seen DESC LIMIT 1"
+    )
+    _BY_DEDUPE_KEY = (
+        _SELECT + " WHERE p.dedupe_key = ? ORDER BY l.last_seen DESC LIMIT 1"
+    )
 
     def get(self, key: str, source: str = "") -> Optional[StoredLead]:
         """The most recently seen lead for this address, optionally by source."""
@@ -1054,18 +1068,13 @@ class LeadStore:
         needle = (identifier or "").strip()
         if not needle:
             return None
-        row = self.connection.execute(
-            self._SELECT + " WHERE l.lead_id = ? ORDER BY l.last_seen DESC LIMIT 1",
-            (needle,),
-        ).fetchone()
-        if row is not None:
-            return self._row_to_stored(row)
-        row = self.connection.execute(
-            self._SELECT + " WHERE p.dedupe_key = ? ORDER BY l.last_seen DESC LIMIT 1",
-            (needle.lower(),),
-        ).fetchone()
-        if row is not None:
-            return self._row_to_stored(row)
+        for sql, value in (
+            (self._BY_LEAD_ID, needle),
+            (self._BY_DEDUPE_KEY, needle.lower()),
+        ):
+            row = self.connection.execute(sql, (value,)).fetchone()
+            if row is not None:
+                return self._row_to_stored(row)
         matches = self.search(SearchQuery(text=needle))
         return matches[0] if matches else None
 

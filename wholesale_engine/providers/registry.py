@@ -1,50 +1,136 @@
-"""Provider selection for ``--source``.
+"""The provider registry: adapters in, no vendor hard-coded.
 
-Deliberately conservative: the only provider that resolves out of the box is
-``csv``. No paid vendor is wired in, because choosing one is a decision that
-requires reading that vendor's actual API documentation, terms and pricing —
-not something to guess at.
+A provider is registered by name with a factory and a capability declaration.
+The application never mentions a vendor — it asks the registry for whatever
+``DATA_PROVIDER`` names, and works with whatever capabilities that adapter
+declares.
 
-To add a real provider:
+**No paid vendor ships registered.** Choosing one means reading that vendor's
+official API documentation, terms and pricing, and writing an adapter against
+it. Two entries exist out of the box:
 
-1. Read the vendor's official API documentation.
-2. Subclass :class:`HttpPropertyDataProvider`, filling in ``search_path``,
-   ``build_search_params`` and ``parse_lead``.
-3. Register it here with :func:`register`.
-4. Put the key in ``.env`` as ``PROPERTY_DATA_API_KEY``.
+``csv``            local files, no credentials, no cost — the TEST-mode default
+``http-template``  a finished transport with no vendor behind it
 
-Nothing else in the engine changes.
+Adding a real one:
+
+    from wholesale_engine.providers import (
+        Capability, HttpPropertyDataProvider, register,
+    )
+
+    class MyVendor(HttpPropertyDataProvider):
+        name = "myvendor"
+        search_path = "properties/search"          # from THEIR documentation
+        capabilities = (Capability.SEARCH, Capability.OWNER)
+
+        def build_search_params(self, criteria): ...
+        def parse_lead(self, payload): ...
+
+    register("myvendor", MyVendor.from_settings, "My Vendor", MyVendor.capabilities)
+
+Then ``DATA_PROVIDER=myvendor`` in ``.env``. Nothing else changes.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from ..settings import NO_PROVIDER_MESSAGE, ProviderSettings
-from .base import PropertyDataProvider, ProviderInfo, ProviderNotConfigured
+from .base import Capability, PropertyDataProvider, ProviderInfo, ProviderNotConfigured
 from .csv_provider import CsvProvider
 from .http_provider import HttpPropertyDataProvider
 from .metrics import ProviderMetrics
 
-#: name -> factory(settings, csv_path, comps_path, metrics) -> provider
+#: factory(settings, csv_path, comps_path, metrics) -> PropertyDataProvider
 Factory = Callable[..., PropertyDataProvider]
 
-_REGISTRY: Dict[str, Factory] = {}
-_DESCRIPTIONS: Dict[str, str] = {}
+
+@dataclass(frozen=True)
+class Registration:
+    """One registered adapter and everything known about it before construction."""
+
+    name: str
+    factory: Factory
+    description: str = ""
+    capabilities: Tuple[Capability, ...] = ()
+    #: False for anything that reaches the network.
+    is_local: bool = False
+    #: True when the adapter fabricates data (TEST mode only).
+    is_test_provider: bool = False
+    #: Environment variables the adapter needs before it can be constructed.
+    required_settings: Tuple[str, ...] = ()
+    #: Where the endpoint and auth contract came from.
+    documentation: str = ""
+
+    def missing_settings(self, settings: ProviderSettings) -> List[str]:
+        import os
+
+        return [
+            name for name in self.required_settings
+            if not (os.environ.get(name, "").strip())
+        ]
+
+    def is_configured(self, settings: ProviderSettings) -> bool:
+        return not self.missing_settings(settings)
 
 
-def register(name: str, factory: Factory, description: str = "") -> None:
-    """Add a provider under ``name``, usable as ``--source <name>``."""
-    key = name.strip().lower()
+_REGISTRY: Dict[str, Registration] = {}
+
+
+def register(
+    name: str,
+    factory: Factory,
+    description: str = "",
+    capabilities: Tuple[Capability, ...] = (),
+    is_local: bool = False,
+    is_test_provider: bool = False,
+    required_settings: Tuple[str, ...] = (),
+    documentation: str = "",
+) -> None:
+    """Add an adapter under ``name``, usable as ``DATA_PROVIDER=<name>``."""
+    key = (name or "").strip().lower()
     if not key:
         raise ValueError("a provider needs a name")
-    _REGISTRY[key] = factory
-    _DESCRIPTIONS[key] = description
+    _REGISTRY[key] = Registration(
+        name=key,
+        factory=factory,
+        description=description,
+        capabilities=tuple(capabilities),
+        is_local=is_local,
+        is_test_provider=is_test_provider,
+        required_settings=tuple(required_settings),
+        documentation=documentation,
+    )
+
+
+def unregister(name: str) -> bool:
+    return _REGISTRY.pop((name or "").strip().lower(), None) is not None
 
 
 def registered_names() -> List[str]:
     return sorted(_REGISTRY)
+
+
+def registration(name: str) -> Optional[Registration]:
+    return _REGISTRY.get((name or "").strip().lower())
+
+
+def supports(name: str, capability: Capability) -> bool:
+    """Does the named adapter declare this capability, without constructing it?"""
+    entry = registration(name)
+    return bool(entry and capability in entry.capabilities)
+
+
+def providers_for(capability: Capability) -> List[str]:
+    """Every registered adapter that declares ``capability``."""
+    return sorted(n for n, e in _REGISTRY.items() if capability in e.capabilities)
+
+
+# ---------------------------------------------------------------------------
+# The two adapters that ship
+# ---------------------------------------------------------------------------
 
 
 def _csv_factory(
@@ -71,29 +157,91 @@ def _http_template_factory(
     return HttpPropertyDataProvider(settings, metrics)
 
 
-register("csv", _csv_factory, CsvProvider.description)
-register("http-template", _http_template_factory, HttpPropertyDataProvider.description)
+register(
+    "csv", _csv_factory, CsvProvider.description,
+    capabilities=(Capability.SEARCH, Capability.COMPS),
+    is_local=True,
+    documentation="Local files only — no vendor API involved.",
+)
+register(
+    "http-template", _http_template_factory, HttpPropertyDataProvider.description,
+    capabilities=(Capability.SEARCH,),
+    required_settings=("PROPERTY_DATA_API_KEY", "PROPERTY_DATA_BASE_URL"),
+    documentation=HttpPropertyDataProvider.documentation_note,
+)
+
+
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
 
 
 def describe_sources(settings: Optional[ProviderSettings] = None) -> str:
-    """A ``--list-sources`` table, including why each one is or is not usable."""
+    """The ``--list-sources`` table, with why each adapter is or is not usable."""
     settings = settings or ProviderSettings.from_env()
-    lines = ["AVAILABLE SOURCES (--source)"]
+    lines = ["AVAILABLE PROVIDERS (DATA_PROVIDER / --source)"]
     for name in registered_names():
-        note = _DESCRIPTIONS.get(name, "")
-        if name == "csv":
-            status = "ready"
-        elif settings.has_property_data:
-            status = "credentials present, endpoint not implemented"
+        entry = _REGISTRY[name]
+        if entry.is_local:
+            status = "READY (local, no credentials)"
+        elif entry.is_configured(settings):
+            status = "CONFIGURED"
         else:
-            status = "not configured (" + ", ".join(settings.missing_for_property_data()) + ")"
-        lines.append(f"  {name:<16} {status}")
-        if note:
-            lines.append(f"  {'':<16} {note}")
+            status = "NOT CONNECTED — needs " + ", ".join(entry.missing_settings(settings))
+        lines.append(f"  {name:<16}{status}")
+        if entry.description:
+            lines.append(f"  {'':<16}{entry.description}")
     lines.append("")
     lines.append(f"  Credentials: {settings.describe()}")
     if not settings.has_property_data:
         lines.append(f"  {NO_PROVIDER_MESSAGE}")
+    return "\n".join(lines)
+
+
+def capability_matrix(settings: Optional[ProviderSettings] = None) -> str:
+    """Which adapter can answer which question. Independently, per capability."""
+    settings = settings or ProviderSettings.from_env()
+    names = registered_names()
+    width = max([16] + [len(n) for n in names])
+    lines = ["PROVIDER CAPABILITIES", ""]
+    header = f"{'CAPABILITY':<20}" + "".join(f"{n:<{width + 2}}" for n in names)
+    lines.append(header)
+    lines.append("-" * len(header))
+    for capability in Capability:
+        row = f"{capability.label:<20}"
+        for name in names:
+            row += f"{'YES' if supports(name, capability) else 'no':<{width + 2}}"
+        lines.append(row)
+    lines.append("")
+    for name in names:
+        entry = _REGISTRY[name]
+        state = (
+            "READY" if entry.is_local
+            else "CONFIGURED" if entry.is_configured(settings)
+            else "NOT CONNECTED"
+        )
+        lines.append(f"  {name:<16}{state}")
+        if entry.documentation:
+            lines.append(f"  {'':<16}{entry.documentation}")
+    return "\n".join(lines)
+
+
+def health_report(
+    settings: Optional[ProviderSettings] = None,
+    csv_path: Optional[Path] = None,
+    comps_path: Optional[Path] = None,
+) -> str:
+    """Try to construct every adapter and ask whether it is actually usable."""
+    settings = settings or ProviderSettings.from_env()
+    lines = ["PROVIDER HEALTH", ""]
+    for name in registered_names():
+        try:
+            provider = get_provider(name, settings, csv_path, comps_path)
+        except ProviderNotConfigured as exc:
+            lines.append(f"  {name:<16}NOT CONNECTED — {exc}")
+            continue
+        ok, message = provider.health_check()
+        lines.append(f"  {name:<16}{'OK' if ok else 'FAILING'} — {message}")
     return "\n".join(lines)
 
 
@@ -104,44 +252,39 @@ def get_provider(
     comps_path: Optional[Path] = None,
     metrics: Optional[ProviderMetrics] = None,
 ) -> PropertyDataProvider:
-    """Build the named provider, or raise :class:`ProviderNotConfigured`.
-
-    The caller decides what to do about an unconfigured provider. The funnel
-    falls back to CSV and says so; it never pretends the live one answered.
-    """
+    """Build the named adapter, or raise :class:`ProviderNotConfigured`."""
     key = (name or "csv").strip().lower()
-    if key not in _REGISTRY:
+    entry = _REGISTRY.get(key)
+    if entry is None:
         raise ProviderNotConfigured(
-            f"unknown source '{name}'. Available: {', '.join(registered_names())}. "
-            "No provider is selected for you — adding one means reading that "
-            "vendor's API documentation first."
+            f"unknown provider '{name}'. Registered: {', '.join(registered_names())}. "
+            "No vendor is selected for you — adding one means reading that "
+            "vendor's API documentation and registering an adapter."
         )
-    return _REGISTRY[key](settings or ProviderSettings.from_env(), csv_path, comps_path, metrics)
+    missing = entry.missing_settings(settings or ProviderSettings.from_env())
+    if missing:
+        raise ProviderNotConfigured(
+            f"{key} is NOT CONNECTED: {', '.join(missing)} not set. Copy "
+            ".env.example to .env and fill in the values from your provider account."
+        )
+    return entry.factory(
+        settings or ProviderSettings.from_env(), csv_path, comps_path, metrics
+    )
 
 
 def provider_info(name: str) -> Optional[ProviderInfo]:
-    """Static description of a provider without constructing it."""
-    key = (name or "").strip().lower()
-    if key not in _REGISTRY:
+    """Static description of an adapter without constructing it."""
+    entry = registration(name)
+    if entry is None:
         return None
-    if key == "csv":
-        return ProviderInfo(
-            name="csv",
-            description=CsvProvider.description,
-            is_local=True,
-            requires_credentials=False,
-            capabilities=("search_properties", "get_comps"),
-            documentation_note=CsvProvider.documentation_note,
-            configured=True,
-        )
     settings = ProviderSettings.from_env()
     return ProviderInfo(
-        name=key,
-        description=_DESCRIPTIONS.get(key, ""),
-        is_local=False,
-        requires_credentials=True,
-        capabilities=("search_properties",),
-        documentation_note=HttpPropertyDataProvider.documentation_note,
-        configured=settings.has_property_data,
-        missing_settings=settings.missing_for_property_data(),
+        name=entry.name,
+        description=entry.description,
+        is_local=entry.is_local,
+        requires_credentials=bool(entry.required_settings),
+        capabilities=tuple(str(c) for c in entry.capabilities),
+        documentation_note=entry.documentation,
+        configured=entry.is_configured(settings),
+        missing_settings=entry.missing_settings(settings),
     )

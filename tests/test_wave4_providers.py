@@ -97,13 +97,29 @@ class SettingsTests(unittest.TestCase):
         for name in ENV_VARS:
             self.assertIn(name, text, f"{name} missing from .env.example")
 
-    def test_env_example_holds_no_values(self):
+    def test_env_example_ships_no_credential_values(self):
+        # Non-secret defaults (mode, provider names, budget caps) carry values
+        # on purpose. Anything that looks like a credential must be blank.
+        secret_markers = ("KEY", "SECRET", "PASSWORD", "TOKEN", "JSON", "URL", "TO=")
         text = (Path(__file__).resolve().parent.parent / ".env.example").read_text()
         for line in text.splitlines():
-            if line.strip() and not line.startswith("#"):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            name = stripped.split("=", 1)[0]
+            if any(marker in name.upper() for marker in secret_markers):
                 self.assertTrue(
-                    line.strip().endswith("="), f"placeholder carries a value: {line}"
+                    stripped.endswith("="), f"credential carries a value: {line}"
                 )
+
+    def test_env_example_documents_the_mode_and_provider_slots(self):
+        text = (Path(__file__).resolve().parent.parent / ".env.example").read_text()
+        for name in (
+            "WHOLESALE_MODE", "DATA_PROVIDER", "COMPS_PROVIDER",
+            "SKIP_TRACE_PROVIDER", "NOTIFICATION_PROVIDER",
+            "MAX_RAW_LEADS", "MAX_RESEARCH", "MAX_COMPS", "MAX_SKIP_TRACES",
+        ):
+            self.assertIn(name, text)
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +207,7 @@ class RegistryTests(unittest.TestCase):
     def test_an_unknown_source_is_refused_not_guessed(self):
         with self.assertRaises(ProviderNotConfigured) as ctx:
             get_provider("some-vendor")
-        self.assertIn("unknown source", str(ctx.exception))
+        self.assertIn("unknown provider", str(ctx.exception))
 
     def test_describe_sources_states_the_fallback(self):
         text = describe_sources(ProviderSettings())

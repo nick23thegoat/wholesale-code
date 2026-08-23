@@ -138,6 +138,37 @@ CREATE TABLE IF NOT EXISTS assignments (
     created_at          TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS contact_methods (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id         TEXT NOT NULL,
+    contact_id          INTEGER REFERENCES contacts(id) ON DELETE CASCADE,
+    kind                TEXT NOT NULL,
+    value               TEXT NOT NULL,
+    phone_type          TEXT NOT NULL DEFAULT 'UNKNOWN',
+    confidence          TEXT NOT NULL DEFAULT 'UNKNOWN',
+    status              TEXT NOT NULL DEFAULT 'UNVERIFIED',
+    source              TEXT NOT NULL DEFAULT '',
+    source_date         TEXT,
+    last_verified       TEXT,
+    is_test_data        INTEGER NOT NULL DEFAULT 0,
+    attempts            INTEGER NOT NULL DEFAULT 0,
+    last_outcome        TEXT,
+    notes               TEXT NOT NULL DEFAULT '',
+    created_at          TEXT NOT NULL,
+    UNIQUE(property_id, kind, value)
+);
+
+CREATE TABLE IF NOT EXISTS seller_responses (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id         TEXT NOT NULL,
+    response            TEXT NOT NULL,
+    recorded_at         TEXT NOT NULL,
+    notes               TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_methods_property ON contact_methods(property_id);
+CREATE INDEX IF NOT EXISTS idx_methods_kind ON contact_methods(kind);
+CREATE INDEX IF NOT EXISTS idx_responses_property ON seller_responses(property_id);
 CREATE INDEX IF NOT EXISTS idx_contacts_property ON contacts(property_id);
 CREATE INDEX IF NOT EXISTS idx_contacts_follow_up ON contacts(next_follow_up);
 CREATE INDEX IF NOT EXISTS idx_outreach_property ON outreach(property_id);
@@ -341,6 +372,196 @@ class AcquisitionStore:
         )
         self.connection.commit()
         return True
+
+    # ==================================================================
+    # Contact methods — multiple phones and emails per owner
+    # ==================================================================
+
+    def _row_to_method(self, row: sqlite3.Row) -> "ContactMethod":
+        from .contact_methods import ContactMethod, MethodKind, MethodStatus
+
+        return ContactMethod(
+            method_id=row["id"],
+            property_id=row["property_id"],
+            contact_id=row["contact_id"],
+            kind=MethodKind(row["kind"]),
+            value=row["value"],
+            phone_type=PhoneType.parse(row["phone_type"]),
+            confidence=Confidence.parse(row["confidence"]),
+            status=MethodStatus(row["status"]),
+            source=row["source"],
+            source_date=_as_date(row["source_date"]),
+            last_verified=_as_date(row["last_verified"]),
+            is_test_data=bool(row["is_test_data"]),
+            attempts=row["attempts"],
+            last_outcome=row["last_outcome"],
+            notes=row["notes"],
+        )
+
+    def methods_for(
+        self, property_id: str, kind: Optional[object] = None
+    ) -> List["ContactMethod"]:
+        """Every way to reach this owner, best first."""
+        sql = "SELECT * FROM contact_methods WHERE property_id = ?"
+        params: List[Any] = [property_id]
+        if kind is not None:
+            sql += " AND kind = ?"
+            params.append(str(kind))
+        rows = [self._row_to_method(r) for r in self.connection.execute(sql, params)]
+        return sorted(rows, key=lambda m: m.rank(), reverse=True)
+
+    def save_method(self, method: "ContactMethod") -> "MergeOutcome":
+        """Add or merge one contact method.
+
+        Never blindly overwrites: a verified record beats a weaker update, and
+        the disagreement is recorded rather than applied. Returns the outcome
+        so the caller can report what actually happened.
+        """
+        from .contact_methods import merge_method
+
+        existing = next(
+            (
+                m for m in self.methods_for(method.property_id, method.kind)
+                if m.value.lower() == method.value.lower()
+            ),
+            None,
+        )
+        outcome = merge_method(existing, method)
+        merged = outcome.method
+        now = self._now()
+        with closing(self.connection.cursor()) as cur:
+            if merged.method_id is None:
+                cur.execute(
+                    """INSERT INTO contact_methods
+                       (property_id, contact_id, kind, value, phone_type, confidence,
+                        status, source, source_date, last_verified, is_test_data,
+                        attempts, last_outcome, notes, created_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        merged.property_id, merged.contact_id, str(merged.kind),
+                        merged.value, str(merged.phone_type), str(merged.confidence),
+                        str(merged.status), merged.source, _iso(merged.source_date),
+                        _iso(merged.last_verified), int(merged.is_test_data),
+                        merged.attempts, merged.last_outcome, merged.notes, now,
+                    ),
+                )
+                merged.method_id = cur.lastrowid
+            else:
+                cur.execute(
+                    """UPDATE contact_methods SET contact_id=?, phone_type=?,
+                           confidence=?, status=?, source=?, source_date=?,
+                           last_verified=?, is_test_data=?, attempts=?,
+                           last_outcome=?, notes=?
+                       WHERE id = ?""",
+                    (
+                        merged.contact_id, str(merged.phone_type), str(merged.confidence),
+                        str(merged.status), merged.source, _iso(merged.source_date),
+                        _iso(merged.last_verified), int(merged.is_test_data),
+                        merged.attempts, merged.last_outcome, merged.notes,
+                        merged.method_id,
+                    ),
+                )
+        self.connection.commit()
+        if outcome.action in ("added", "improved"):
+            self._log(
+                merged.property_id, "contact_added",
+                f"{merged.kind} {outcome.action}: {merged.display()} [{merged.label()}]",
+            )
+        elif outcome.action == "conflict":
+            self._log(
+                merged.property_id, "contact_added",
+                f"CONFLICT kept verified {merged.kind}: {outcome.detail}",
+            )
+        return outcome
+
+    def set_method_status(
+        self, method_id: int, status: object, notes: str = ""
+    ) -> bool:
+        """Mark a method verified, wrong, invalid or do-not-contact."""
+        from .contact_methods import MethodStatus
+
+        value = MethodStatus(str(status))
+        verified = _iso(date.today()) if value is MethodStatus.VERIFIED else None
+        cur = self.connection.execute(
+            """UPDATE contact_methods
+               SET status = ?, last_verified = COALESCE(?, last_verified),
+                   notes = TRIM(notes || ? )
+               WHERE id = ?""",
+            (str(value), verified, f"\n{notes}" if notes else "", method_id),
+        )
+        self.connection.commit()
+        return cur.rowcount > 0
+
+    def all_methods(self) -> List["ContactMethod"]:
+        return [
+            self._row_to_method(r)
+            for r in self.connection.execute(
+                "SELECT * FROM contact_methods ORDER BY property_id, kind, id"
+            )
+        ]
+
+    def suppressed_values(self) -> List[str]:
+        """Everything marked DO_NOT_CONTACT, INVALID or WRONG.
+
+        The suppression list. Nothing here may ever be dialled, texted or
+        emailed again, whatever a later skip trace says.
+        """
+        from .contact_methods import SUPPRESSED_STATUSES
+
+        names = tuple(str(s) for s in SUPPRESSED_STATUSES)
+        placeholders = ", ".join("?" for _ in names)
+        return [
+            row["value"]
+            for row in self.connection.execute(
+                f"SELECT value FROM contact_methods WHERE status IN ({placeholders})",
+                names,
+            )
+        ]
+
+    # ==================================================================
+    # Seller responses
+    # ==================================================================
+
+    def record_seller_response(
+        self, property_id: str, response: object, notes: str = ""
+    ) -> str:
+        """Log how the seller replied. Free text lives in ``notes``."""
+        from .models import SellerResponse
+
+        value = SellerResponse.parse(response)
+        self.connection.execute(
+            """INSERT INTO seller_responses (property_id, response, recorded_at, notes)
+               VALUES (?,?,?,?)""",
+            (property_id, str(value), self._now(), notes),
+        )
+        self.connection.commit()
+        self._log(
+            property_id, "seller_response",
+            f"{value}" + (f": {notes[:60]}" if notes else ""),
+        )
+        if value is SellerResponse.DO_NOT_CONTACT:
+            from .contact_methods import MethodStatus
+
+            for method in self.methods_for(property_id):
+                self.set_method_status(
+                    method.method_id, MethodStatus.DO_NOT_CONTACT,
+                    "seller asked not to be contacted",
+                )
+        return str(value)
+
+    def seller_responses(self, property_id: str) -> List[Dict[str, Any]]:
+        return [
+            dict(r)
+            for r in self.connection.execute(
+                "SELECT * FROM seller_responses WHERE property_id = ? "
+                "ORDER BY recorded_at DESC, id DESC",
+                (property_id,),
+            )
+        ]
+
+    def latest_seller_response(self, property_id: str) -> Optional[str]:
+        rows = self.seller_responses(property_id)
+        return rows[0]["response"] if rows else None
 
     # ==================================================================
     # Outreach

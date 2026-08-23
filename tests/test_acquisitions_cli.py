@@ -43,8 +43,11 @@ class AcquisitionCliTests(unittest.TestCase):
         self.assertIn("NOT EARNED", output)
 
     def test_daily(self):
+        # Wave 6 turned --daily into the full production run: the report plus
+        # the ranked priority list.
         output = self.cmd("--daily")
-        self.assertIn("DAILY ACQUISITIONS PLAN", output)
+        self.assertIn("DAILY ACQUISITIONS REPORT", output)
+        self.assertIn("DAILY PRIORITY", output)
         self.assertIn("Nothing here has been sent", output)
 
     def test_contact_queue(self):
@@ -100,15 +103,21 @@ class AcquisitionCliTests(unittest.TestCase):
         self.assertIn("No skip-trace provider is connected", output)
         self.assertIn("never generate", output)
 
+    def test_bulk_skip_tracing_asks_before_spending(self):
+        output = self.cmd("--skip-trace", "--skip-trace-provider", "mock", expect=0)
+        self.assertIn("qualify for a skip trace", output)
+        self.assertIn("Cancelled", output)
+
     def test_skip_trace_with_the_mock_warns_it_is_fictional(self):
         output = self.cmd(
-            "--skip-trace", "--skip-trace-provider", "mock", "--limit", "3"
+            "--skip-trace", "--skip-trace-provider", "mock", "--limit", "3", "--yes"
         )
         self.assertIn("FICTIONAL TEST DATA", output)
         self.assertIn("Do not dial", output)
 
     def test_a_mock_contact_shows_as_test_data_in_the_queue(self):
-        self.cmd("--skip-trace", "--skip-trace-provider", "mock", "--limit", "5", "--quiet")
+        self.cmd("--skip-trace", "--skip-trace-provider", "mock", "--limit", "5",
+                 "--yes", "--quiet")
         output = self.cmd("--contact-queue", "--limit", "10")
         self.assertIn("TEST DATA", output)
 
@@ -240,7 +249,8 @@ class AcquisitionCliTests(unittest.TestCase):
     # --- exports -------------------------------------------------------
 
     def test_every_acquisition_export_writes_csv_and_json(self):
-        self.cmd("--skip-trace", "--skip-trace-provider", "mock", "--limit", "3", "--quiet")
+        self.cmd("--skip-trace", "--skip-trace-provider", "mock", "--limit", "3",
+                 "--yes", "--quiet")
         self.cmd("--property", "LH-011", "--log-call", "--outcome", "CONNECTED", "--quiet")
         self.cmd("--property", "LH-021", "--make-offer", "59500", "--quiet")
         self.cmd("--property", "LH-021", "--contract", "--purchase-price", "59500", "--quiet")
@@ -260,7 +270,8 @@ class AcquisitionCliTests(unittest.TestCase):
             self.assertTrue((self.tmp / f"{name}.json").exists(), name)
 
     def test_the_contacts_export_marks_test_data(self):
-        self.cmd("--skip-trace", "--skip-trace-provider", "mock", "--limit", "5", "--quiet")
+        self.cmd("--skip-trace", "--skip-trace-provider", "mock", "--limit", "5",
+                 "--yes", "--quiet")
         self.cmd("--export-contacts", "--format", "csv", "--quiet")
         with open(self.tmp / "contacts.csv", newline="", encoding="utf-8") as handle:
             rows = list(csv.DictReader(handle))

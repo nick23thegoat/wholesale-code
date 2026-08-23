@@ -40,6 +40,7 @@ from wholesale_engine.lead_hunter import (  # noqa: E402
     with_overrides,
 )
 from wholesale_engine.acquisitions import (  # noqa: E402
+    AcquisitionStore,
     AcquisitionWorkflow,
     Assignment,
     AssignmentStatus,
@@ -50,18 +51,47 @@ from wholesale_engine.acquisitions import (  # noqa: E402
     Direction,
     OfferStatus,
     Outcome,
+    SellerResponse,
     SkipTraceNotConfigured,
     get_skip_trace_provider,
+    skip_trace_status,
 )
 from wholesale_engine.formatting import money  # noqa: E402
+from wholesale_engine.automation import (  # noqa: E402
+    DailyPriorityEngine,
+    monitor,
+    render_daily_report,
+    render_monitor,
+    render_priority,
+    run_daily,
+)
+from wholesale_engine.backup import create_backup  # noqa: E402
+from wholesale_engine.budget import ApiBudget  # noqa: E402
 from wholesale_engine.hunt import HuntBudget, run_hunt  # noqa: E402
+from wholesale_engine.importer import ImportError_, run_import  # noqa: E402
+from wholesale_engine.integrations import (  # noqa: E402
+    EventType,
+    NotificationCenter,
+    get_note_writer,
+    get_sheets_adapter,
+    integration_status,
+)
+from wholesale_engine.runtime import ModeError, RunMode, RuntimeConfig  # noqa: E402
+from wholesale_engine.security import (  # noqa: E402
+    ValidationError,
+    audit_source,
+    render_audit,
+    safe_path,
+)
 from wholesale_engine.outputs import CsvAdapter, JsonAdapter, publish_all  # noqa: E402
 from wholesale_engine.models.results import AnalysisResult  # noqa: E402
 from wholesale_engine.providers import (  # noqa: E402
     HuntCriteria,
     ProviderNotConfigured,
+    capability_matrix,
     describe_sources,
     get_provider,
+    health_report,
 )
 from wholesale_engine.reports.hunt_report import (  # noqa: E402
     render_hunt_summary,
@@ -325,10 +355,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="pipeline counts and projected (not earned) economics",
     )
     acquisition.add_argument(
-        "--daily", action="store_true",
-        help="the prioritized daily acquisitions plan",
-    )
-    acquisition.add_argument(
         "--deal-room", metavar="PROPERTY_ID",
         help="the complete deal summary for one property",
     )
@@ -417,6 +443,92 @@ def build_parser() -> argparse.ArgumentParser:
     acquisition.add_argument(
         "--assignment-status", default=None,
         help="BUYER_SEARCH, BUYER_INTERESTED, BUYER_OFFER, ASSIGNMENT_SIGNED, CLOSED, FAILED",
+    )
+
+    production = parser.add_argument_group("production (Wave 6)")
+    production.add_argument(
+        "--daily", action="store_true",
+        help="the full daily acquisitions run: ingest, dedupe, detect changes, "
+             "score, research, rank, and report",
+    )
+    production.add_argument(
+        "--mode", choices=("TEST", "LIVE", "test", "live"), default=None,
+        help="TEST (default) uses local files and fictional data; LIVE uses real "
+             "provider APIs and refuses to start without the credentials",
+    )
+    production.add_argument(
+        "--provider-status", action="store_true",
+        help="which provider supports which capability, and what is connected",
+    )
+    production.add_argument(
+        "--integrations", action="store_true",
+        help="BUILT / CONFIGURED / CONNECTED status for every outbound adapter",
+    )
+    production.add_argument(
+        "--health", action="store_true",
+        help="try every configured provider and report whether it is usable",
+    )
+    production.add_argument(
+        "--security-audit", action="store_true",
+        help="scan the package for hard-coded secrets, shell calls and unsafe SQL",
+    )
+    production.add_argument(
+        "--budget-status", action="store_true", help="show the API caps for this run",
+    )
+    production.add_argument(
+        "--monitor", action="store_true",
+        help="what changed on stored leads since their previous sighting",
+    )
+    production.add_argument(
+        "--max-raw-leads", type=int, default=None, help="cap raw leads pulled per run",
+    )
+    production.add_argument(
+        "--max-research", type=int, default=None, help="cap billable research calls",
+    )
+    production.add_argument(
+        "--max-comps", type=int, default=None, help="cap billable comp calls",
+    )
+    production.add_argument(
+        "--max-skip-traces", type=int, default=None, help="cap billable skip traces",
+    )
+    production.add_argument(
+        "--auto-skip-trace", action="store_true",
+        help="skip trace qualifying leads without asking (off by default)",
+    )
+    production.add_argument(
+        "--yes", action="store_true", help="answer yes to confirmation prompts",
+    )
+    production.add_argument(
+        "--no-ingest", action="store_true",
+        help="--daily without pulling new leads: report on what is already stored",
+    )
+    production.add_argument(
+        "--backup", action="store_true", help="write a timestamped backup archive",
+    )
+    production.add_argument(
+        "--backup-dir", type=Path, default=None, help="where backups are written",
+    )
+    production.add_argument(
+        "--include-secrets", action="store_true",
+        help="include .env in the backup (excluded by default)",
+    )
+    production.add_argument(
+        "--import", dest="import_kind", choices=("leads", "contacts", "buyers"),
+        help="import records from --file without creating duplicates",
+    )
+    production.add_argument("--file", type=Path, default=None, help="file to import")
+    production.add_argument(
+        "--sheets", action="store_true", help="publish the sheet tabs through SHEETS_PROVIDER",
+    )
+    production.add_argument(
+        "--response", metavar="RESPONSE",
+        help="record a seller response on --property: INTERESTED, NOT_INTERESTED, "
+             "CALL_BACK, WANTS_PRICE, WANTS_OFFER, COUNTER, ACCEPTED, REJECTED, "
+             "NO_RESPONSE, WRONG_NUMBER, DO_NOT_CONTACT",
+    )
+    production.add_argument(
+        "--suggest", action="store_true",
+        help="advisory summaries for --property (rule-based; no AI needed)",
     )
 
     export = parser.add_argument_group("export (Wave 4)")
@@ -1206,23 +1318,69 @@ def _acquisition_actions(
 
 
 def _run_skip_trace(args: argparse.Namespace, workflow: "AcquisitionWorkflow") -> bool:
-    """Run the configured skip-trace provider. Default provider refuses."""
+    """Run the configured skip-trace provider, within budget and gates.
+
+    Skip tracing is the most expensive call in the pipeline, so it is never
+    automatic for everything: a lead has to clear a quality bar, the batch is
+    capped, and a bulk run asks before it spends.
+    """
     try:
         provider = get_skip_trace_provider(args.skip_trace_provider)
     except SkipTraceNotConfigured as exc:
         print(str(exc), file=sys.stderr)
         return False
 
+    budget = budget_from_args(args)
+
     if args.property:
         row = workflow.leads.find_one(args.property)
         targets = [row] if row else []
     else:
-        targets = [e.row for e in workflow.skip_trace_candidates(limit=args.limit or 10)]
+        # Only leads that earned it: the score gates, a live status, and no
+        # contact route already on file.
+        targets = []
+        for entry in workflow.skip_trace_candidates():
+            row = entry.row
+            if budget.qualifies_for_skip_trace(
+                lead_score=row.lead_score,
+                deal_score=row.deal_score,
+                priority_score=row.priority_score,
+                status=row.status,
+                already_reachable=bool(entry.contact and entry.contact.is_reachable),
+            ):
+                targets.append(row)
+
+    cap = args.limit or budget.max_skip_traces
+    over_budget = max(len(targets) - cap, 0)
+    targets = targets[:cap]
 
     if not targets:
         if not args.quiet:
-            print("Nothing to skip trace.")
+            print(
+                "Nothing qualifies for a skip trace. Gates: "
+                + budget.describe_gates()
+            )
         return True
+
+    # Say what it will cost before spending it.
+    if not args.quiet:
+        estimate = budget.estimate("skip_trace", len(targets))
+        print(
+            f"{len(targets)} lead(s) qualify for a skip trace"
+            + (f" ({over_budget} more capped by MAX_SKIP_TRACES={cap})" if over_budget else "")
+            + (f", estimated cost ${estimate:,.2f}." if estimate else
+               ", cost unknown — set cost_per_skip_trace from your vendor's pricing.")
+        )
+
+    # Bulk runs ask first, unless automatic mode was turned on deliberately.
+    if len(targets) > 1 and not budget.auto_skip_trace and not args.property:
+        if not confirm(f"Skip trace {len(targets)} lead(s)?", args.yes):
+            print(
+                "Cancelled — nothing was traced. Pass --yes, or --auto-skip-trace "
+                "to stop asking.",
+                file=sys.stderr,
+            )
+            return False
 
     if provider.is_test_provider and not args.quiet:
         print(
@@ -1370,6 +1528,323 @@ def render_buyers(buyers) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Wave 6 — production
+# ---------------------------------------------------------------------------
+
+
+def budget_from_args(args: argparse.Namespace) -> ApiBudget:
+    """Defaults, then environment, then explicit --max-* flags."""
+    return ApiBudget.from_env(
+        max_raw_leads=args.max_raw_leads,
+        max_research=args.max_research,
+        max_comps=args.max_comps,
+        max_skip_traces=args.max_skip_traces,
+        auto_skip_trace=args.auto_skip_trace or None,
+    )
+
+
+def runtime_from_args(args: argparse.Namespace) -> RuntimeConfig:
+    """Resolve the run mode and every provider slot."""
+    overrides = {}
+    if getattr(args, "source", None) and args.source != "csv":
+        overrides["DATA_PROVIDER"] = args.source
+    if getattr(args, "skip_trace_provider", None) and args.skip_trace_provider != "none":
+        overrides["SKIP_TRACE_PROVIDER"] = args.skip_trace_provider
+    return RuntimeConfig.from_env(
+        mode=args.mode, overrides=overrides, auto_confirm=args.yes
+    )
+
+
+def confirm(prompt: str, auto_yes: bool) -> bool:
+    """Ask before spending money. ``--yes`` answers for you."""
+    if auto_yes:
+        return True
+    if not sys.stdin or not sys.stdin.isatty():
+        # Non-interactive (cron, CI): never assume yes for a billable action.
+        return False
+    try:
+        return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
+def run_status_cli(args: argparse.Namespace, runtime: RuntimeConfig) -> int:
+    """``--provider-status`` / ``--integrations`` / ``--health`` /
+    ``--security-audit`` / ``--budget-status``."""
+    printed = False
+    if args.provider_status:
+        print(capability_matrix(runtime.settings))
+        print()
+        print(skip_trace_status())
+        printed = True
+    if args.integrations:
+        if printed:
+            print()
+        print(integration_status())
+        printed = True
+    if args.health:
+        if printed:
+            print()
+        csv_path = args.leads or SAMPLE_LEADS
+        print(health_report(runtime.settings, csv_path, args.lead_comps))
+        printed = True
+    if args.budget_status:
+        if printed:
+            print()
+        print(budget_from_args(args).render())
+        printed = True
+    if args.security_audit:
+        if printed:
+            print()
+        findings = audit_source()
+        print(render_audit(findings))
+        return 1 if any(f.severity == "HIGH" for f in findings) else 0
+    return 0 if printed else 0
+
+
+def run_production_cli(
+    args: argparse.Namespace, config: EngineConfig, runtime: RuntimeConfig
+) -> int:
+    """``--daily``, ``--monitor``, ``--backup``, ``--import``, ``--sheets``."""
+    budget = budget_from_args(args)
+    store = open_store(args)
+    exit_code = 0
+    printed = False
+
+    try:
+        acquisitions = AcquisitionStore(store)
+        workflow = AcquisitionWorkflow(store, acquisitions, config=config)
+
+        # --- per-property actions --------------------------------------
+        if args.property and (args.response or args.suggest):
+            row = store.find_one(args.property)
+            if row is None:
+                print(
+                    f"No stored property matches '{args.property}'.", file=sys.stderr
+                )
+                return 1
+            if args.response:
+                try:
+                    recorded = acquisitions.record_seller_response(
+                        row.dedupe_key, args.response, args.note or ""
+                    )
+                except ValueError as exc:
+                    print(str(exc), file=sys.stderr)
+                    return 2
+                from wholesale_engine.acquisitions.models import RESPONSE_STATUS
+
+                suggested = RESPONSE_STATUS.get(recorded)
+                if suggested:
+                    workflow.set_status(
+                        row.dedupe_key, suggested, f"seller response {recorded}"
+                    )
+                if not args.quiet:
+                    print(f"Seller response recorded: {recorded}")
+                    if suggested:
+                        print(f"  Status -> {suggested}")
+                    if recorded == "DO_NOT_CONTACT":
+                        print(
+                            "  Every contact method for this property is now "
+                            "suppressed and will never be contacted again."
+                        )
+                printed = True
+            if args.suggest and not args.quiet:
+                print(_render_suggestions(workflow, row, config, runtime))
+                printed = True
+
+        # --- backup -----------------------------------------------------
+        if args.backup:
+            result = create_backup(
+                database=args.db or DEFAULT_DB_PATH,
+                destination_dir=args.backup_dir or (DEFAULT_OUTPUT_DIR / "backups"),
+                reports_dir=args.out_dir or DEFAULT_OUTPUT_DIR,
+                include_secrets=args.include_secrets,
+            )
+            if not args.quiet:
+                print(result.render())
+            printed = True
+
+        # --- import -----------------------------------------------------
+        if args.import_kind:
+            try:
+                path = safe_path(args.file, label="--file")
+                result = run_import(args.import_kind, path, store, acquisitions)
+            except (ValidationError, ImportError_) as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            if not args.quiet:
+                print(result.render())
+            printed = True
+
+        # --- monitor ----------------------------------------------------
+        if args.monitor and not args.quiet:
+            print(render_monitor(monitor(store, args.limit)))
+            printed = True
+
+        # --- the daily run ----------------------------------------------
+        if args.daily:
+            provider = None
+            if not args.no_ingest:
+                try:
+                    provider = get_provider(
+                        runtime.data_provider,
+                        settings=runtime.settings,
+                        csv_path=args.leads or SAMPLE_LEADS,
+                        comps_path=args.lead_comps or (
+                            SAMPLE_LEAD_COMPS if not args.leads else None
+                        ),
+                    )
+                except ProviderNotConfigured as exc:
+                    print(f"WARNING: {exc}", file=sys.stderr)
+                    print(
+                        "Continuing without ingestion — reporting on stored leads only.",
+                        file=sys.stderr,
+                    )
+
+            notifications = NotificationCenter.build(
+                runtime.slot("NOTIFICATION_PROVIDER")
+            )
+            report = run_daily(
+                store,
+                provider=provider,
+                criteria=criteria_from_args(args, lead_config_from_args(args)),
+                engine_config=config,
+                lead_config=lead_config_from_args(args),
+                budget=budget,
+                runtime=runtime,
+                notifications=notifications,
+                ingest=provider is not None,
+            )
+            if not args.quiet:
+                print(render_daily_report(report))
+                print()
+                print(render_priority(report.priorities))
+            paths = _export_daily(args, report, config)
+            report.exports = paths
+            if paths and not args.quiet:
+                print()
+                for path in paths:
+                    print(f"exported -> {path}")
+            printed = True
+
+        # --- sheets -----------------------------------------------------
+        if args.sheets:
+            printed = _publish_sheets(args, workflow, config, runtime) or printed
+
+        if not printed and not args.quiet:
+            print("Nothing to do. Try --daily, --dashboard or --provider-status.")
+        return exit_code
+    finally:
+        store.close()
+
+
+def _render_suggestions(
+    workflow, row, config: EngineConfig, runtime: RuntimeConfig
+) -> str:
+    """Advisory summaries for one property. Never acts on anything."""
+    writer = get_note_writer(runtime.slot("AI_PROVIDER"))
+    contact = workflow.store.best_contact(row.dedupe_key)
+    entries = [
+        e for e in workflow.queue_entries(include_closed=True)
+        if e.row.dedupe_key == row.dedupe_key
+    ]
+    priority = entries[0].priority if entries else None
+    context = {
+        "property_id": row.dedupe_key,
+        "owner_name": contact.owner_name if contact else None,
+        "contact_attempts": contact.contact_attempts if contact else 0,
+        "last_outcome": contact.last_outcome if contact else None,
+        "next_follow_up": (
+            contact.next_follow_up.isoformat()
+            if contact and contact.next_follow_up else None
+        ),
+        "is_test_data": contact.is_test_data if contact else False,
+        "seller_response": workflow.store.latest_seller_response(row.dedupe_key),
+        "arv": row.arv,
+        "repairs": row.repair_estimate,
+        "mao": row.mao,
+        "asking_price": row.asking_price,
+        "potential_fee": row.potential_fee,
+        "target_fee": config.target_wholesale_fee,
+        "next_action": str(priority.action) if priority else None,
+        "action_reason": priority.reason if priority else None,
+    }
+    blocks = [f"ADVISORY SUMMARIES — {row.address or row.dedupe_key}", "=" * 78]
+    for suggestion in writer.all_suggestions(context):
+        blocks.append("")
+        blocks.append(suggestion.render())
+    return "\n".join(blocks)
+
+
+def _export_daily(args: argparse.Namespace, report, config: EngineConfig) -> List[Path]:
+    """Write the daily report as CSV and JSON."""
+    directory = args.out_dir or DEFAULT_OUTPUT_DIR
+    rows = [item.as_dict() for item in report.priorities]
+    columns = [
+        "band", "action", "property_id", "address", "reason",
+        "deal_score", "lead_score", "priority_score",
+        "next_deadline", "days_to_deadline",
+    ]
+    adapters: List[Any] = []
+    if args.format in ("csv", "both"):
+        adapters.append(CsvAdapter(directory))
+    if args.format in ("json", "both"):
+        adapters.append(JsonAdapter(directory, meta=report.as_dict()))
+    return publish_all(adapters, rows, columns, "daily_report")
+
+
+def _publish_sheets(
+    args: argparse.Namespace, workflow, config: EngineConfig, runtime: RuntimeConfig
+) -> bool:
+    """Publish the sheet tabs through whatever SHEETS_PROVIDER names."""
+    from wholesale_engine.integrations import IntegrationNotConfigured
+    from wholesale_engine.reports.acquisition_exports import (
+        PIPELINE_COLUMNS, offer_rows, pipeline_rows, OFFER_COLUMNS,
+    )
+    from wholesale_engine.reports.acquisitions import (
+        CONTACT_QUEUE_COLUMNS, FOLLOW_UP_COLUMNS, contact_queue_rows, follow_up_rows,
+    )
+    from wholesale_engine.reports.deal_tables import DEAL_COLUMNS, deal_rows
+
+    name = runtime.slot("SHEETS_PROVIDER")
+    adapter = get_sheets_adapter(name, args.out_dir or DEFAULT_OUTPUT_DIR)
+    if adapter is None:
+        print(
+            "SHEETS_PROVIDER is not set. Use 'local' to write the same tabs as "
+            "CSV files, or 'google' once you have a service account.",
+            file=sys.stderr,
+        )
+        return False
+
+    entries = workflow.queue_entries()
+    buckets = workflow.follow_ups_by_bucket()
+    datasets = (
+        ("hot_leads", deal_rows(workflow.leads.hot_leads()), DEAL_COLUMNS),
+        ("contact_queue", contact_queue_rows(entries), CONTACT_QUEUE_COLUMNS),
+        (
+            "follow_ups",
+            follow_up_rows(buckets["OVERDUE"] + buckets["TODAY"] + buckets["UPCOMING"]),
+            FOLLOW_UP_COLUMNS,
+        ),
+        ("offers", offer_rows(workflow.store.all_offers()), OFFER_COLUMNS),
+        (
+            "pipeline",
+            pipeline_rows(entries, workflow.store, config.target_wholesale_fee),
+            PIPELINE_COLUMNS,
+        ),
+    )
+    for tab, rows, columns in datasets:
+        try:
+            result = adapter.publish(tab, rows, columns)
+        except (IntegrationNotConfigured, NotImplementedError) as exc:
+            print(f"{tab}: {exc}", file=sys.stderr)
+            return False
+        if not args.quiet:
+            print(result.render())
+    return True
+
+
 def render_all(results: List[AnalysisResult], config: EngineConfig) -> str:
     return "\n\n".join(render_result(result, config) for result in results)
 
@@ -1377,9 +1852,29 @@ def render_all(results: List[AnalysisResult], config: EngineConfig) -> str:
 def run(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
+    # --- resolve the mode before anything reads data ---------------------
+    try:
+        runtime = runtime_from_args(args)
+        runtime.assert_live_ready()
+    except (ValueError, ModeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    status_command = bool(
+        args.provider_status or args.integrations or args.health
+        or args.security_audit or args.budget_status
+    )
+    if status_command:
+        return run_status_cli(args, runtime)
+
     if args.list_sources:
-        print(describe_sources())
+        print(describe_sources(runtime.settings))
         return 0
+
+    production_command = bool(
+        args.daily or args.monitor or args.backup or args.import_kind
+        or args.sheets or args.response or args.suggest
+    )
 
     acquisition_command = bool(
         args.contact_queue or args.follow_ups or args.dashboard or args.daily
@@ -1393,6 +1888,8 @@ def run(argv: Optional[List[str]] = None) -> int:
         or args.export_assignments or args.export_pipeline
         or (args.property and args.follow_up)
     )
+    # --daily is a production command now, not the Wave 5 plan renderer.
+    acquisition_command = acquisition_command and not args.daily
 
     database_command = bool(
         args.search or args.top_deals or args.hot_leads or args.watchlist
@@ -1403,7 +1900,7 @@ def run(argv: Optional[List[str]] = None) -> int:
     hunting = bool(args.leads or args.sample_leads)
     if not (
         args.sample or args.csv or args.json or hunting or args.hunt
-        or database_command or acquisition_command
+        or database_command or acquisition_command or production_command
     ):
         build_parser().print_help()
         print(
@@ -1425,6 +1922,12 @@ def run(argv: Optional[List[str]] = None) -> int:
         min_viable_wholesale_fee=args.viable_fee,
     )
 
+    if not args.quiet and (production_command or args.hunt):
+        print(runtime.banner(), file=sys.stderr)
+
+    if production_command and not args.hunt:
+        return run_production_cli(args, config, runtime)
+
     if acquisition_command and not args.hunt:
         return run_acquisitions_cli(args, config)
 
@@ -1433,6 +1936,8 @@ def run(argv: Optional[List[str]] = None) -> int:
 
     if args.hunt:
         code = run_hunt_cli(args, config)
+        if code == 0 and production_command:
+            return run_production_cli(args, config, runtime)
         if code == 0 and acquisition_command:
             return run_acquisitions_cli(args, config)
         if code == 0 and database_command:

@@ -43,6 +43,11 @@ wholesale_engine/
 ├── hunt.py                     the cost-controlled funnel (WAVE 4)
 ├── priority.py                 the PRIORITY SCORE — a third, separate ranking (WAVE 4)
 ├── pipeline_status.py          the 16 acquisition statuses (WAVE 5)
+├── runtime.py                  TEST / LIVE mode and provider slots (WAVE 6)
+├── budget.py                   API caps and skip-trace gates (WAVE 6)
+├── security.py                 input validation + the source audit (WAVE 6)
+├── backup.py                   --backup (WAVE 6)
+├── importer.py                 CSV/JSON import without duplicates (WAVE 6)
 ├── requirements.txt            stdlib only; pytest optional
 ├── README.md
 ├── models/
@@ -70,6 +75,7 @@ wholesale_engine/
 ├── providers/                  WAVE 4
 │   ├── base.py                 PropertyDataProvider: the five capabilities
 │   ├── criteria.py             HuntCriteria — geography, price, signals, gates
+│   ├── http_client.py          timeouts, retries, backoff, credential redaction
 │   ├── csv_provider.py         local CSV provider (works with no credentials)
 │   ├── http_provider.py        real-vendor template — inert until one is chosen
 │   ├── registry.py             --source selection; no paid vendor pre-selected
@@ -85,8 +91,20 @@ wholesale_engine/
 │   ├── models.py               Contact, OutreachActivity, Offer, Contract, Buyer, Assignment
 │   ├── skip_trace.py           the interface + a mock that is obviously fake
 │   ├── contact_priority.py     what to physically do next, per lead
+│   ├── contact_methods.py      multiple phones/emails, merge + suppression
 │   ├── workflow.py             queue, follow-ups, offers, dashboard, daily plan
 │   └── store.py                SQLite for the acquisition side
+├── automation/                 WAVE 6
+│   ├── daily.py                the 13-step daily run
+│   ├── daily_priority.py       the 8-band ranked action list
+│   └── monitoring.py           price drops, new distress, deal improvements
+├── integrations/               WAVE 6
+│   ├── base.py                 BUILT / CONFIGURED / CONNECTED contract
+│   ├── notifications.py        console (ready), email + webhook (not connected)
+│   ├── sheets.py               Google Sheets (not connected) + local fallback
+│   ├── crm.py                  six-operation CRM interface (not connected)
+│   ├── outreach.py             SMS / email / voice interfaces (nothing sends)
+│   └── ai_notes.py             advisory summaries (rule-based, no AI needed)
 ├── storage/                    WAVE 4
 │   ├── database.py             SQLite store, watchlist, notes, activity, search
 │   └── changes.py              price drops, ARV/DOM moves, new distress
@@ -112,7 +130,9 @@ wholesale_engine/
     ├── acquisition_exports.py  contacts/outreach/offers/contracts/buyers/pipeline
     └── output/                 generated files land here
 .env.example                    credential placeholders (copy to .env)
-tests/                          672 unit + end-to-end tests
+tests/                          820 unit + end-to-end tests
+.env.example                    every setting, no values
+SCHEDULING.md                   cron, launchd and Task Scheduler
 ```
 
 The layering is strict, and it is what makes each wave additive:
@@ -793,6 +813,12 @@ pytest tests -v                              # if pytest is installed
 - `tests/test_acquisitions_cli.py` — every Wave 5 command end to end, including
   a scan asserting no module anywhere generates a phone-shaped literal outside
   the reserved 555 range.
+- `tests/test_wave6_production.py` — the provider registry and independent
+  capability detection, TEST/LIVE mode, credential redaction, retry and
+  backoff behaviour, cost controls, multi-method contacts, every integration's
+  refusal to pretend it is connected, the daily run, the priority engine, deal
+  monitoring, backup, import, and a source audit that fails the build on a
+  hard-coded secret, a shell call or an interpolated query.
 
 `Wave1RegressionTests` re-asserts the original Wave 1 sample decisions, so a
 later change that altered underwriting behaviour would fail the suite.
@@ -1433,7 +1459,290 @@ projected, because that is what they are:
 
 ---
 
-## 14. Disclaimer
+## 14. Wave 6 — production
+
+Waves 1–5 built the engine. Wave 6 makes it safe to point at real data and
+real money.
+
+### TEST and LIVE
+
+```bash
+python3 -m wholesale_engine.main --daily              # TEST (the default)
+python3 -m wholesale_engine.main --mode LIVE --daily  # real providers
+```
+
+| Mode | Data | Credentials |
+| --- | --- | --- |
+| `TEST` (default) | local CSVs and clearly-labelled fictional data | none needed |
+| `LIVE` | real provider APIs | **refuses to start** without them |
+
+The modes never mix. A LIVE run with a missing credential stops before it
+reads anything:
+
+```
+LIVE mode cannot start:
+  - PROPERTY_DATA_API_KEY is not set
+  - PROPERTY_DATA_BASE_URL is not set
+```
+
+LIVE also refuses any provider that fabricates data (the mock skip tracer),
+and TEST refuses to use a configured live tracer even if the key is present.
+Every run prints its mode before it does anything.
+
+### Providers
+
+Capabilities are detected **independently**, so a vendor that sells search and
+owner data but not comps says exactly that:
+
+```bash
+python3 -m wholesale_engine.main --provider-status
+```
+
+```
+CAPABILITY          csv               http-template
+PROPERTY SEARCH     YES               YES
+PROPERTY DETAILS    no                no
+OWNER DATA          no                no
+EQUITY              no                no
+DISTRESS            no                no
+FORECLOSURE         no                no
+TAX DATA            no                no
+COMPS               YES               no
+VALUATION           no                no
+```
+
+Asking for an unsupported capability returns a clear "not supported", never an
+empty list that reads like "none found".
+
+**Adding a vendor.** No paid provider ships registered — that decision needs
+its documentation, terms and pricing. When you have one:
+
+```python
+from wholesale_engine.providers import Capability, HttpPropertyDataProvider, register
+
+class MyVendor(HttpPropertyDataProvider):
+    name = "myvendor"
+    search_path = "properties/search"        # from THEIR documentation
+    capabilities = (Capability.SEARCH, Capability.OWNER)
+    def build_search_params(self, criteria): ...
+    def parse_lead(self, payload): ...
+
+register("myvendor", MyVendor.from_settings, "My Vendor", MyVendor.capabilities,
+         required_settings=("PROPERTY_DATA_API_KEY", "PROPERTY_DATA_BASE_URL"))
+```
+
+Then `DATA_PROVIDER=myvendor` in `.env`. Nothing else changes.
+
+### API safety
+
+Every network call goes through `SafeHttpClient`, so these are written once
+and cannot be forgotten in an adapter:
+
+- a timeout on every request
+- bounded retries with exponential backoff and jitter
+- `Retry-After` honoured on 429 and 503, capped so a bad header cannot stall
+- a self-imposed rate limit independent of the vendor's
+- **a rejected credential is never retried** — that just burns quota
+- **https only**; a plain-http base URL is refused
+- **credentials never reach a log line**: URLs, headers, bodies and error text
+  are all redacted, and the client's `repr` hides the key
+
+What it deliberately will not do: solve CAPTCHAs, ignore robots.txt, work
+around a login or a paywall, or evade anti-bot systems. An adapter that needs
+any of those is one this engine will not carry.
+
+### Cost control
+
+```bash
+python3 -m wholesale_engine.main --budget-status
+```
+
+```
+MAX_RAW_LEADS       1000
+MAX_RESEARCH        100   (lead score >= 50)
+MAX_COMPS           30    (lead score >= 60)
+MAX_SKIP_TRACES     10    (lead score >= 70 OR deal score >= 70 OR priority >= 75,
+                           and the property is not PASSED, DEAD or CLOSED)
+Bulk skip tracing   asks first
+```
+
+Set them in `.env` or per run with `--max-research`, `--max-comps`,
+`--max-skip-traces`. **Nothing expensive runs on a rejected lead** — a lead
+that failed the cheap filters or the score gate never reaches research, comps
+or skip tracing, and a test asserts it.
+
+Skip tracing tells you what it will cost and asks before spending:
+
+```
+9 lead(s) qualify for a skip trace, cost unknown — set cost_per_skip_trace
+from your vendor's pricing.
+Skip trace 9 lead(s)? [y/N]
+```
+
+A scheduled run has no TTY, so that prompt *declines* rather than assuming
+yes. `--auto-skip-trace` turns the asking off, deliberately.
+
+No per-call cost is invented. The rate card is your vendor's, and the engine
+says "unknown" until you fill it in.
+
+### The daily run
+
+```bash
+python3 -m wholesale_engine.main --daily
+```
+
+Thirteen steps: pull → dedupe → detect changes → score → research → calculate
+→ rank → hot leads → follow-ups → counters → offers → contracts → export.
+
+Then the ranked list, in eight bands:
+
+```
+1. SELLER COUNTERS               their number is on the table
+2. OFFERS REQUIRING RESPONSE     you are holding it up
+3. OVERDUE FOLLOW-UPS            you promised and did not
+4. HOT LEADS WITH CONTACT        you can act right now
+5. HOT LEADS NEEDING SKIP TRACE  you cannot act yet
+6. NEW HIGH-QUALITY DEALS        worth looking at today
+7. CONTRACTS APPROACHING DEADLINES
+8. BUYER OPPORTUNITIES
+```
+
+A contract deadline three days out beats a new lead, however good the lead
+looks — a missed inspection deadline costs earnest money.
+
+See `SCHEDULING.md` for cron, launchd and Windows Task Scheduler.
+
+### Deal monitoring
+
+```bash
+python3 -m wholesale_engine.main --monitor
+```
+
+The interesting event is the one that changes:
+
+```
+77 Sabal Palm Way:
+  DEAL IMPROVEMENT DETECTED
+    PRICE REDUCTION: $119,000 -> $99,000 (-$20,000, 16.8%)
+    NEW PRE FORECLOSURE
+    Deal Score: 58 -> 79
+```
+
+Monitoring never re-scores anything. It reports the delta; the engines that
+own the scores still own them.
+
+### Contacts: several phones, each with provenance
+
+A real skip trace returns three numbers of varying quality from different
+dates. Each is a record with its own confidence, source and verified date.
+
+- duplicates **merge**, they do not stack
+- **verified information is never silently overwritten** — a weaker update to
+  a verified number is recorded as a conflict in the notes, not applied
+- `DO_NOT_CONTACT`, `WRONG` and `INVALID` are **absolute**: a suppressed
+  number is never contacted again, whatever a later trace says
+
+Recording a `DO_NOT_CONTACT` response suppresses every method for that
+property at once.
+
+### Seller responses
+
+```bash
+python3 -m wholesale_engine.main --property LH-011 --response WANTS_OFFER \
+    --note "Asked for a number by Friday."
+```
+
+`INTERESTED` · `NOT_INTERESTED` · `CALL_BACK` · `WANTS_PRICE` · `WANTS_OFFER` ·
+`COUNTER` · `ACCEPTED` · `REJECTED` · `NO_RESPONSE` · `WRONG_NUMBER` ·
+`DO_NOT_CONTACT`. Each moves the pipeline to the status it implies.
+
+### Integrations
+
+```bash
+python3 -m wholesale_engine.main --integrations
+```
+
+| Adapter | Kind | State |
+| --- | --- | --- |
+| console | notification | **CONNECTED** |
+| email, webhook | notification | NOT CONNECTED |
+| local-sheets | sheets | **CONNECTED** |
+| google-sheets | sheets | NOT CONNECTED |
+| local-crm | crm | **CONNECTED** |
+| CRM | crm | NOT CONNECTED |
+| sms, email, voice | outreach | NOT CONNECTED — **nothing sends** |
+| rule-based | ai-notes | **CONNECTED** |
+| llm | ai-notes | NOT CONNECTED |
+
+An adapter that is not connected **raises** rather than silently doing
+nothing. A silent no-op that looks like a successful send is worse than an
+error, because you would act on it.
+
+**Sheets** is one direction only: ENGINE → GOOGLE SHEETS. Rows are keyed on
+`property_id` so a re-export updates in place instead of appending duplicates —
+that upsert is finished and tested against the local fallback, so wiring the
+real API is the only remaining work. Two-way sync is not implemented and is
+not planned as a default: a sheet edited by three people and a database
+written by a nightly job disagree in ways nobody can reconcile safely.
+
+**Outreach** has four guards, all tested: nothing sends without an explicit
+action; a batch above five is refused as mass messaging unless bulk is
+deliberately enabled; the suppression list is absolute; and with no
+credentials a send is a recorded dry run, never a silent success.
+
+**AI notes** are advisory only. The default writer uses no AI at all — it
+restates what the record already says, so it cannot hallucinate. Output is
+always stamped `ADVISORY` and never changes a status or sends anything.
+
+### Security
+
+```bash
+python3 -m wholesale_engine.main --security-audit
+```
+
+Scans the package on every test run and fails the build on: shell execution,
+`eval`/`exec`/`pickle`, disabled TLS verification, hard-coded credentials, or
+SQL built by formatting instead of parameters. Currently **zero findings**.
+
+Standing rules:
+
+- **SQL** is fully parameterized. The only value ever interpolated is a column
+  name chosen from a fixed allow-list.
+- **Shell**: there is no `subprocess`, `os.system`, `eval` or `exec` anywhere
+  in the package, so there is no command-injection surface.
+- **Paths** from the command line go through `safe_path`, which refuses
+  traversal, directories, devices and unsupported extensions.
+- **Secrets** live in the environment, never in code, never in a log line.
+  `.env` is git-ignored and excluded from backups unless explicitly requested.
+
+### Backup and import
+
+```bash
+python3 -m wholesale_engine.main --backup
+python3 -m wholesale_engine.main --import leads --file my_leads.csv
+```
+
+The database is copied through SQLite's own backup API, so a backup taken
+mid-write is still consistent. **`.env` is excluded by default** —
+`--include-secrets` exists and is deliberately awkward.
+
+Import matches on the same normalized address key the hunt uses, so
+re-importing yesterday's export updates rather than doubling.
+
+### Status vocabulary
+
+Used throughout the reports and this README:
+
+| Word | Means |
+| --- | --- |
+| **BUILT** | the interface exists; nothing implemented behind it |
+| **CONFIGURED** | credentials present, send path not wired |
+| **CONNECTED** | usable right now |
+| **NOT CONNECTED** | credentials missing |
+
+---
+
+## 15. Disclaimer
 
 This is a screening tool, not investment, legal, or appraisal advice. It works
 only from the data you give it, and no deal it scores is guaranteed profitable.

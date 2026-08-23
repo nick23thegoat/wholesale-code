@@ -23,16 +23,46 @@ from .criteria import HuntCriteria
 from .csv_provider import CsvProvider
 from .http_provider import HttpPropertyDataProvider
 from .metrics import ProviderMetrics
+from .http_client import (
+    HttpConfig,
+    HttpError,
+    HttpStats,
+    SafeHttpClient,
+    redact,
+    redact_headers,
+    redact_payload,
+)
 from .registry import (
+    Registration,
+    capability_matrix,
     describe_sources,
     get_provider,
+    health_report,
     provider_info,
+    providers_for,
     register,
     registered_names,
+    registration,
+    supports,
+    unregister,
 )
 
 __all__ = [
     "Capability",
+    "HttpConfig",
+    "HttpError",
+    "HttpStats",
+    "Registration",
+    "SafeHttpClient",
+    "capability_matrix",
+    "health_report",
+    "providers_for",
+    "redact",
+    "redact_headers",
+    "redact_payload",
+    "registration",
+    "supports",
+    "unregister",
     "CsvProvider",
     "HttpPropertyDataProvider",
     "HuntCriteria",

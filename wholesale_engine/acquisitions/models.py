@@ -132,6 +132,59 @@ OUTCOME_STATUS: Dict[str, str] = {
 }
 
 
+class SellerResponse(str, Enum):
+    """How the seller replied. Recorded by you; nothing infers these."""
+
+    INTERESTED = "INTERESTED"
+    NOT_INTERESTED = "NOT_INTERESTED"
+    CALL_BACK = "CALL_BACK"
+    WANTS_PRICE = "WANTS_PRICE"
+    WANTS_OFFER = "WANTS_OFFER"
+    COUNTER = "COUNTER"
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+    NO_RESPONSE = "NO_RESPONSE"
+    WRONG_NUMBER = "WRONG_NUMBER"
+    DO_NOT_CONTACT = "DO_NOT_CONTACT"
+
+    def __str__(self) -> str:
+        return self.value
+
+    @classmethod
+    def parse(cls, raw: Any) -> "SellerResponse":
+        text = str(raw or "").strip().upper().replace("-", "_").replace(" ", "_")
+        for member in cls:
+            if member.value == text:
+                return member
+        raise ValueError(
+            f"unknown seller response '{raw}'. Valid: "
+            + ", ".join(m.value for m in cls)
+        )
+
+
+#: Responses that end the conversation for good.
+TERMINAL_RESPONSES = (
+    SellerResponse.NOT_INTERESTED,
+    SellerResponse.DO_NOT_CONTACT,
+    SellerResponse.REJECTED,
+)
+
+#: Seller response -> the pipeline status it implies.
+RESPONSE_STATUS: Dict[str, str] = {
+    SellerResponse.INTERESTED.value: "CONVERSATION",
+    SellerResponse.CALL_BACK.value: "FOLLOW_UP",
+    SellerResponse.WANTS_PRICE.value: "OFFER_PREPARING",
+    SellerResponse.WANTS_OFFER.value: "OFFER_PREPARING",
+    SellerResponse.COUNTER.value: "NEGOTIATING",
+    SellerResponse.ACCEPTED.value: "UNDER_CONTRACT",
+    SellerResponse.REJECTED.value: "DEAD",
+    SellerResponse.NOT_INTERESTED.value: "DEAD",
+    SellerResponse.DO_NOT_CONTACT.value: "DEAD",
+    SellerResponse.WRONG_NUMBER.value: "HOT",
+    SellerResponse.NO_RESPONSE.value: "CONTACTED",
+}
+
+
 class OfferStatus(str, Enum):
     DRAFT = "DRAFT"
     SENT = "SENT"

@@ -220,3 +220,5 @@ __marimo__/
 # Wholesale engine — local lead database and generated reports
 wholesale_engine/data/leads.db
 wholesale_engine/data/leads.db-journal
+wholesale_engine/reports/output/backups/
+wholesale_engine/reports/output/sheet_*.csv

@@ -228,10 +228,19 @@ class SkipTraceTests(unittest.TestCase):
         self.assertIn("never generate", message)
         self.assertIn("DNC", message)
 
-    def test_no_paid_provider_is_registered(self):
+    def test_no_paid_vendor_is_registered(self):
+        # 'http' is a template that refuses to construct without credentials
+        # AND a vendor subclass. No vendor ships wired in.
         from wholesale_engine.acquisitions import SKIP_TRACE_PROVIDERS
 
-        self.assertEqual(set(SKIP_TRACE_PROVIDERS), {"none", "mock"})
+        self.assertEqual(set(SKIP_TRACE_PROVIDERS), {"none", "mock", "http"})
+
+    def test_the_http_template_refuses_without_credentials(self):
+        from wholesale_engine.acquisitions import get_skip_trace_provider
+
+        with self.assertRaises(SkipTraceNotConfigured) as ctx:
+            get_skip_trace_provider("http")
+        self.assertIn("NOT CONNECTED", str(ctx.exception))
 
     def test_an_unknown_provider_is_refused(self):
         with self.assertRaises(SkipTraceNotConfigured):

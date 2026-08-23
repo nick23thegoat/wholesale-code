@@ -30,7 +30,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Generic, List, Optional, TypeVar
+from typing import Any, Dict, Generic, List, Optional, Tuple, TypeVar
 
 from ..lead_hunter.models import Lead
 from ..models.property import Comp
@@ -41,16 +41,51 @@ T = TypeVar("T")
 
 
 class Capability(str, Enum):
-    """What a provider can be asked for."""
+    """What a provider can be asked for.
+
+    Detected independently per provider: a vendor that sells search and owner
+    data but not comps declares exactly that, and asking for comps returns a
+    clear "not supported", never an empty list that reads like "none found".
+    """
 
     SEARCH = "search_properties"
     PROPERTY = "get_property"
     OWNER = "get_owner"
+    EQUITY = "get_equity"
     DISTRESS = "get_distress_data"
+    FORECLOSURE = "get_foreclosure_data"
+    TAX = "get_tax_data"
     COMPS = "get_comps"
+    VALUATION = "get_valuation"
 
     def __str__(self) -> str:
         return self.value
+
+    @property
+    def label(self) -> str:
+        """Human name used by ``--provider-status``."""
+        return {
+            "search_properties": "PROPERTY SEARCH",
+            "get_property": "PROPERTY DETAILS",
+            "get_owner": "OWNER DATA",
+            "get_equity": "EQUITY",
+            "get_distress_data": "DISTRESS",
+            "get_foreclosure_data": "FORECLOSURE",
+            "get_tax_data": "TAX DATA",
+            "get_comps": "COMPS",
+            "get_valuation": "VALUATION",
+        }[self.value]
+
+    @classmethod
+    def parse(cls, raw: object) -> "Capability":
+        text = str(raw or "").strip().lower()
+        for member in cls:
+            if member.value == text or member.name.lower() == text:
+                return member
+        raise ValueError(
+            f"unknown capability '{raw}'. Valid: "
+            + ", ".join(m.value for m in cls)
+        )
 
 
 class ProviderError(RuntimeError):
@@ -195,6 +230,31 @@ class PropertyDataProvider(ABC):
         """
         return self._unsupported(Capability.DISTRESS)
 
+    def get_equity(self, lead: Lead) -> ProviderResponse[Dict[str, Any]]:
+        """Mortgage balance, liens and derived equity from public records.
+
+        A provider that returns no mortgage balance leaves it unknown. This
+        engine never substitutes zero for "not reported" — the two mean very
+        different things to an offer.
+        """
+        return self._unsupported(Capability.EQUITY)
+
+    def get_foreclosure_data(self, lead: Lead) -> ProviderResponse[Dict[str, Any]]:
+        """Foreclosure and pre-foreclosure filings of record."""
+        return self._unsupported(Capability.FORECLOSURE)
+
+    def get_tax_data(self, lead: Lead) -> ProviderResponse[Dict[str, Any]]:
+        """Assessed value, tax amount and delinquency status."""
+        return self._unsupported(Capability.TAX)
+
+    def get_valuation(self, lead: Lead) -> ProviderResponse[Dict[str, Any]]:
+        """A vendor's own automated valuation.
+
+        Treated as a claim, not a fact: an AVM arrives as an unverified ARV
+        and only becomes VERIFIED/SUPPORTED when comps back it up.
+        """
+        return self._unsupported(Capability.VALUATION)
+
     def get_comps(
         self, lead: Lead, radius_miles: float = 1.0, months_back: int = 6
     ) -> ProviderResponse[List[Comp]]:
@@ -208,6 +268,29 @@ class PropertyDataProvider(ABC):
         return self._unsupported(Capability.COMPS)
 
     # ------------------------------------------------------------------
+
+    def health_check(self) -> Tuple[bool, str]:
+        """Is this provider usable right now?
+
+        Local providers answer from the filesystem; remote ones should make
+        the cheapest documented call their vendor offers. The message is
+        always safe to print — no credential ever reaches it.
+        """
+        return True, "local provider, no credentials needed"
+
+    def capability_report(self) -> List[Tuple[str, bool]]:
+        """``[(label, available), ...]`` for every capability, in fixed order.
+
+        Every capability appears, supported or not. A provider is never
+        allowed to be vague about what it cannot do.
+        """
+        return [(c.label, self.supports(c)) for c in Capability]
+
+    def render_capabilities(self) -> str:
+        lines = [f"{self.name.upper()} — {self.description or 'no description'}"]
+        for label, available in self.capability_report():
+            lines.append(f"  {label:<20}{'AVAILABLE' if available else 'NOT AVAILABLE'}")
+        return "\n".join(lines)
 
     def describe(self) -> str:
         where = "local" if self.is_local else "remote"

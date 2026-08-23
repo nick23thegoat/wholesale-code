@@ -20,6 +20,15 @@ from typing import Dict, List, Optional
 
 #: The environment variables the engine reads. Mirrored in ``.env.example``.
 ENV_VARS = (
+    "WHOLESALE_MODE",
+    "DATA_PROVIDER",
+    "COMPS_PROVIDER",
+    "SKIP_TRACE_PROVIDER",
+    "NOTIFICATION_PROVIDER",
+    "MAX_RAW_LEADS",
+    "MAX_RESEARCH",
+    "MAX_COMPS",
+    "MAX_SKIP_TRACES",
     "PROPERTY_DATA_API_KEY",
     "PROPERTY_DATA_BASE_URL",
     "PUBLIC_RECORDS_API_KEY",
