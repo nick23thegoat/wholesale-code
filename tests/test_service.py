@@ -408,8 +408,21 @@ class BuyBoxAccess(ServiceCase):
 
 class RunsAndDecisions(ServiceCase):
     def test_run_history_is_empty_until_a_run_is_recorded(self):
+        # Recording stays opt-in: a default hunt writes no run and no decisions.
         self.hunt()
         self.assertEqual(self.service.run_history(), [])
+
+    def test_a_default_hunt_records_no_decisions_either(self):
+        outcome = self.hunt()
+        self.assertIsNone(outcome.run_id)
+        store = LeadStore(self.tmp / "leads.db")
+        try:
+            count = store.connection.execute(
+                "SELECT COUNT(*) FROM decisions"
+            ).fetchone()[0]
+        finally:
+            store.close()
+        self.assertEqual(count, 0)
 
     def test_recording_a_run_is_opt_in(self):
         self.hunt(record_run=True, trigger="scheduled")
@@ -432,9 +445,12 @@ class RunsAndDecisions(ServiceCase):
         self.assertIsNotNone(self.service.last_successful_run())
 
     def test_decision_reads_work_against_a_written_log(self):
-        # The reads are what this layer owns; writing per-property decisions
-        # from inside the funnel is a separate change.
+        # The funnel writes its own decisions now. These three are injected on
+        # top with reasons this test controls, so the grouping assertions do
+        # not depend on what the sample lead list happens to contain.
         outcome = self.hunt(record_run=True)
+        funnel_decisions = len(self.service.decisions_for_run(outcome.run_id))
+        self.assertGreater(funnel_decisions, 0, "the funnel should record its own")
         store = LeadStore(self.tmp / "leads.db")
         try:
             log = DecisionLog(store.connection)
@@ -450,16 +466,21 @@ class RunsAndDecisions(ServiceCase):
             store.close()
 
         summary = self.service.rejections_for_run(outcome.run_id)
-        self.assertEqual(sum(count for _, _, count in summary), 2)
+        by_reason = {reason: count for _, reason, count in summary}
+        self.assertEqual(by_reason["asking price above buy box maximum"], 1)
+        self.assertEqual(by_reason["below minimum lead score"], 1)
 
-        text = self.service.rejection_summary(outcome.run_id)
-        self.assertIn("WHY 2 PROPERTIES WERE REJECTED", text)
+        self.assertIn(
+            "PROPERTIES WERE REJECTED", self.service.rejection_summary(outcome.run_id)
+        )
 
         history = self.service.decisions_for_property("k1")
         self.assertEqual(len(history), 1)
         self.assertTrue(history[0].was_rejected)
 
-        self.assertEqual(len(self.service.decisions_for_run(outcome.run_id)), 3)
+        self.assertEqual(
+            len(self.service.decisions_for_run(outcome.run_id)), funnel_decisions + 3
+        )
 
     def test_reading_decisions_for_an_unknown_property_is_empty_not_an_error(self):
         self.hunt(record_run=True)

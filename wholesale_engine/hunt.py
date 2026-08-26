@@ -31,7 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .analysis import analyze_property
 from .budget import ApiBudget, UsageReport
@@ -62,6 +62,18 @@ from .providers import (
     PropertyDataProvider,
 )
 from .research import PropertyResearch, PropertyResearchService
+from .storage.decisions import (
+    ACCEPTED,
+    INCOMPLETE,
+    REJECTED,
+    STAGE_BUY_BOX,
+    STAGE_DEAL_SCORE,
+    STAGE_FINAL,
+    STAGE_LEAD_SCORE,
+    DecisionLog,
+    RunRecord,
+)
+from .storage.decisions import Decision as DecisionRecord
 from .storage import (
     ChangeSet,
     LeadSnapshot,
@@ -173,6 +185,38 @@ class HuntResult:
 # ---------------------------------------------------------------------------
 
 
+class Rejection(str):
+    """Why a lead was dropped, with the groupable half kept separate.
+
+    This is a ``str`` on purpose. Everything that already consumes a rejection
+    — ``FilterOutcome.reject``, the rejected-leads export, the report tables —
+    keeps working untouched and keeps printing exactly what it printed before.
+    What is added is :attr:`reason` and :attr:`detail`, which is what the
+    decision log needs.
+
+    The distinction matters because ``rejection_summary`` groups by reason. A
+    reason with the property's own values interpolated into it — "equity below
+    $25,000", "property type duplex not requested" — produces one group per
+    property, which is a list, not a summary. The reason says which rule
+    fired; the detail says what this property's numbers were.
+
+    ``text`` preserves a message that is already correct, so splitting a
+    reason never changes what a person reads.
+    """
+
+    reason: str
+    detail: str
+
+    def __new__(cls, reason: str, detail: str = "", text: Optional[str] = None):
+        rendered = text if text is not None else (
+            f"{reason}: {detail}" if detail else reason
+        )
+        obj = super().__new__(cls, rendered)
+        obj.reason = reason
+        obj.detail = detail
+        return obj
+
+
 def _signal_ok(lead: Lead, required: Sequence[str]) -> bool:
     """Any-of match. Unknown never rejects — it is a gap, not a disqualifier."""
     if not required:
@@ -190,26 +234,48 @@ def cheap_filter(
 ) -> Tuple[List[Lead], List[Tuple[Lead, str]]]:
     """Geography, price, type, signals and equity. Free, so it runs first."""
     kept: List[Lead] = []
-    dropped: List[Tuple[Lead, str]] = []
+    dropped: List[Tuple[Lead, Rejection]] = []
     for lead in leads:
         if not criteria.matches_geography(lead.state, lead.county, lead.city, lead.zip_code):
-            dropped.append((lead, "outside the requested geography"))
+            dropped.append((lead, Rejection(
+                "outside the requested geography",
+                ", ".join(p for p in (lead.state, lead.county, lead.city, lead.zip_code) if p),
+                text="outside the requested geography",
+            )))
             continue
         if not criteria.matches_price(lead.asking_price):
-            dropped.append((lead, "asking price outside the requested band"))
+            dropped.append((lead, Rejection(
+                "asking price outside the requested band",
+                f"asking ${lead.asking_price:,.0f}" if lead.asking_price is not None else "",
+                text="asking price outside the requested band",
+            )))
             continue
         if not criteria.matches_property_type(str(lead.property_type.value)):
-            dropped.append((lead, f"property type {lead.property_type} not requested"))
+            # The property's own type belongs in the detail. In the reason it
+            # would make every distinct type its own rejection group.
+            dropped.append((lead, Rejection(
+                "property type not in the requested set",
+                f"reported {lead.property_type}; requested "
+                + ", ".join(criteria.property_types),
+                text=f"property type {lead.property_type} not requested",
+            )))
             continue
         if not _signal_ok(lead, criteria.required_signals):
-            dropped.append(
-                (lead, "none of the required signals reported: "
-                 + ", ".join(criteria.required_signals))
-            )
+            dropped.append((lead, Rejection(
+                "none of the required signals reported",
+                "required: " + ", ".join(criteria.required_signals),
+                text="none of the required signals reported: "
+                + ", ".join(criteria.required_signals),
+            )))
             continue
         equity = lead.equity_estimate
         if criteria.min_equity is not None and equity is not None and equity < criteria.min_equity:
-            dropped.append((lead, f"equity below ${criteria.min_equity:,.0f}"))
+            # Same again: the threshold and the property's figure are detail.
+            dropped.append((lead, Rejection(
+                "estimated equity below the minimum",
+                f"${equity:,.0f} estimated, minimum ${criteria.min_equity:,.0f}",
+                text=f"equity below ${criteria.min_equity:,.0f}",
+            )))
             continue
         kept.append(lead)
     return kept, dropped
@@ -303,7 +369,7 @@ def fetch_comps(
 # ---------------------------------------------------------------------------
 
 
-def run_hunt(
+def _hunt(
     provider: PropertyDataProvider,
     criteria: Optional[HuntCriteria] = None,
     engine_config: EngineConfig = DEFAULT_CONFIG,
@@ -312,8 +378,15 @@ def run_hunt(
     store: Optional[LeadStore] = None,
     as_of: Optional[date] = None,
     priority_engine: Optional[PriorityEngine] = None,
+    record: Optional[Callable[[DecisionRecord], None]] = None,
 ) -> HuntResult:
-    """Run the full cost-controlled funnel against one provider."""
+    """The funnel itself. See :func:`run_hunt` for the public entry point.
+
+    ``record`` receives one :class:`Decision` per property as the funnel makes
+    it. It is ``None`` for a plain run, in which case not a single decision
+    object is even constructed.
+
+    """
     criteria = criteria or HuntCriteria(states=lead_config.target_states)
     budget = budget or HuntBudget()
     metrics = provider.metrics
@@ -361,17 +434,28 @@ def run_hunt(
         entry.arv_status = arv_status(lead, None)
         results_by_key[id(lead)] = entry
         report.results.append(entry)
+        if record is not None:
+            record(_decision(lead, STAGE_BUY_BOX, REJECTED, reason, score=score))
 
     # --- 4. lead scoring (free) ------------------------------------------
     scored: List[LeadResult] = []
     for lead in survivors:
         score = score_lead(lead, lead_config)
         outcome = apply_filters(lead, score, lead_config)
-        if score.total < criteria.min_lead_score:
-            outcome.reject(
-                f"lead score {score.total:.0f} is below the minimum of "
-                f"{criteria.min_lead_score:.0f}"
-            )
+        # Whether the buy-box filters already rejected it decides which stage
+        # gets the blame below. A lead can fail both; the earlier one is the
+        # one that actually stopped it.
+        rejected_by_filters = not outcome.passed
+        below_lead_score = score.total < criteria.min_lead_score
+        if below_lead_score:
+            outcome.reject(Rejection(
+                "below the minimum lead score",
+                f"scored {score.total:.0f}, minimum {criteria.min_lead_score:.0f}",
+                text=(
+                    f"lead score {score.total:.0f} is below the minimum of "
+                    f"{criteria.min_lead_score:.0f}"
+                ),
+            ))
         entry = LeadResult(lead=lead, score=score, filter_outcome=outcome)
         results_by_key[id(lead)] = entry
         report.results.append(entry)
@@ -380,6 +464,13 @@ def run_hunt(
         else:
             entry.status = STATUS_FILTERED
             entry.arv_status = arv_status(lead, None)
+            if record is not None:
+                stage = STAGE_BUY_BOX if rejected_by_filters else STAGE_LEAD_SCORE
+                record(_decision(
+                    lead, stage, REJECTED,
+                    _first_reason(outcome, rejected_by_filters),
+                    score=score,
+                ))
     scored.sort(key=lambda r: -r.score.total)
     metrics.record_stage(STAGE_LEAD_SCORED, len(scored))
 
@@ -425,13 +516,26 @@ def run_hunt(
         entry.arv_status = arv_status(entry.lead, entry.analysis)
         if entry.analysis.score.total < criteria.min_deal_score:
             entry.status = STATUS_BELOW_DEAL_SCORE
-            entry.filter_outcome.reasons.append(
-                f"deal score {entry.analysis.score.total:.0f} is below the minimum of "
-                f"{criteria.min_deal_score:.0f}"
+            rejection = Rejection(
+                "below the minimum deal score",
+                f"scored {entry.analysis.score.total:.0f}, "
+                f"minimum {criteria.min_deal_score:.0f}",
+                text=(
+                    f"deal score {entry.analysis.score.total:.0f} is below the "
+                    f"minimum of {criteria.min_deal_score:.0f}"
+                ),
             )
+            entry.filter_outcome.reasons.append(rejection)
+            if record is not None:
+                record(_decision(
+                    entry.lead, STAGE_DEAL_SCORE, REJECTED, rejection,
+                    score=entry.score, analysis=entry.analysis,
+                ))
         else:
             entry.status = STATUS_ANALYZED
             analyzed += 1
+            if record is not None:
+                record(_final_decision(entry))
     metrics.record_stage(STAGE_ANALYZED, analyzed)
 
     # --- 8. change detection + persistence -------------------------------
@@ -484,6 +588,163 @@ def run_hunt(
     result.usage.provider_name = provider.name
     result.usage.adopt_provider_usage(provider)
     return result
+
+
+def run_hunt(
+    provider: PropertyDataProvider,
+    criteria: Optional[HuntCriteria] = None,
+    engine_config: EngineConfig = DEFAULT_CONFIG,
+    lead_config: LeadHunterConfig = DEFAULT_LEAD_CONFIG,
+    budget: Optional[HuntBudget] = None,
+    store: Optional[LeadStore] = None,
+    as_of: Optional[date] = None,
+    priority_engine: Optional[PriorityEngine] = None,
+    decisions: Optional[DecisionLog] = None,
+    run_id: Optional[int] = None,
+    trigger: str = "manual",
+    mode: str = "TEST",
+) -> HuntResult:
+    """Run the full cost-controlled funnel against one provider.
+
+    Decision recording is **opt-in and off by default**. With ``decisions``
+    unset nothing is written, no decision object is constructed, and this
+    behaves exactly as it always has.
+
+    When a log is supplied, who owns the run matters:
+
+    * ``decisions`` alone — this function owns the lifecycle. It opens the run
+      and closes it, including when the funnel raises.
+    * ``decisions`` **and** ``run_id`` — the caller already opened that run and
+      will close it. Only the per-property decisions are recorded against it,
+      so a service that brackets a run does not record it twice.
+
+    Decisions are buffered and written in one call after persistence, so a run
+    that dies half way leaves a FAILED run row rather than a scattering of
+    decisions that reads like a completed screen.
+    """
+    if decisions is None:
+        return _hunt(
+            provider, criteria, engine_config, lead_config, budget, store,
+            as_of, priority_engine,
+        )
+
+    owns_run = run_id is None
+    run: Optional[RunRecord] = None
+    if owns_run:
+        run = decisions.start_run(
+            trigger=trigger, provider=provider.name, mode=mode
+        )
+        run_id = run.run_id
+
+    buffered: List[DecisionRecord] = []
+    try:
+        result = _hunt(
+            provider, criteria, engine_config, lead_config, budget, store,
+            as_of, priority_engine, record=buffered.append,
+        )
+    except Exception as exc:  # noqa: BLE001 - record the failure, then re-raise
+        if owns_run and run is not None:
+            decisions.finish_run(run, status="FAILED", error=str(exc))
+        raise
+
+    decisions.record_many(run_id, buffered)
+
+    if owns_run and run is not None:
+        accepted = sum(1 for d in buffered if d.outcome == ACCEPTED)
+        rejected = sum(1 for d in buffered if d.was_rejected)
+        # A provider that refused the search returns before the search stage
+        # is ever recorded. That is not a failed run — nothing broke — but it
+        # is not a clean one either, and the run history should say so.
+        # (report is not the signal here: it defaults to an empty report, so
+        # it is never None.)
+        searched_ok = any(name == STAGE_SEARCHED for name, _ in result.metrics.stages)
+        decisions.finish_run(
+            run,
+            status="OK" if searched_ok else "PARTIAL",
+            error="" if searched_ok else "; ".join(result.warnings),
+            leads_seen=len(buffered),
+            leads_accepted=accepted,
+            leads_rejected=rejected,
+            api_requests_spent=result.usage.research_calls + result.usage.comp_calls,
+        )
+    return result
+
+
+def _decision(
+    lead: Lead,
+    stage: str,
+    outcome: str,
+    rejection: object = "",
+    score: object = None,
+    analysis: object = None,
+) -> DecisionRecord:
+    """One :class:`Decision` for this lead, at this stage.
+
+    A :class:`Rejection` contributes its reason and detail separately; a plain
+    string is treated as the reason with no detail, which is what a filter
+    written before this existed produces.
+    """
+    reason = getattr(rejection, "reason", None) or str(rejection or "")
+    detail = getattr(rejection, "detail", "") or ""
+    return DecisionRecord(
+        dedupe_key=dedupe_key(lead),
+        address=lead.address,
+        stage=stage,
+        outcome=outcome,
+        reason=reason,
+        detail=detail,
+        lead_score=getattr(score, "total", None),
+        deal_score=getattr(getattr(analysis, "score", None), "total", None),
+    )
+
+
+def _final_decision(entry: LeadResult) -> DecisionRecord:
+    """The decision for a lead that reached the end of the funnel.
+
+    Reaching the end is not the same as being worth pursuing, and the three
+    outcomes are genuinely different things:
+
+    * GO / NEGOTIATE — underwritten and worth working. ACCEPTED.
+    * NEED MORE DATA — the analyzer could not finish for want of facts.
+      INCOMPLETE: a gap to fill, not a verdict either way.
+    * PASS — underwritten, and the numbers do not work. REJECTED, at the
+      final stage.
+
+    Recording a PASS as an acceptance is how a list of properties you should
+    not offer on ends up looking like a list of deals, which is the single
+    most expensive mistake this log could make.
+    """
+    analysis = entry.analysis
+    decision = str(getattr(analysis, "decision", "") or "")
+    upper = decision.upper()
+    if "NEED MORE DATA" in upper:
+        outcome, reason = INCOMPLETE, "analyzed but missing data needed to underwrite"
+    elif "PASS" in upper:
+        outcome, reason = REJECTED, "the numbers do not work at any offer"
+    else:
+        outcome, reason = ACCEPTED, "cleared every gate"
+    return DecisionRecord(
+        dedupe_key=dedupe_key(entry.lead),
+        address=entry.lead.address,
+        stage=STAGE_FINAL,
+        outcome=outcome,
+        reason=reason,
+        detail=decision,
+        lead_score=entry.score.total,
+        deal_score=getattr(getattr(analysis, "score", None), "total", None),
+    )
+
+
+def _first_reason(outcome: object, from_filters: bool) -> object:
+    """The reason that actually stopped this lead.
+
+    ``apply_filters`` appends before the lead-score gate does, so when both
+    fired the buy-box reason is first and the score reason is last.
+    """
+    reasons = list(getattr(outcome, "reasons", ()) or ())
+    if not reasons:
+        return "rejected"
+    return reasons[0] if from_filters else reasons[-1]
 
 
 def _apply_research(lead: Lead, research: PropertyResearch) -> None:

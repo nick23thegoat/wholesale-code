@@ -58,7 +58,7 @@ from ..providers.registry import (
 from ..reports.hunt_report import write_hunt_outputs
 from ..settings import NO_PROVIDER_MESSAGE, ProviderSettings
 from ..storage.database import DEFAULT_DB_PATH, LeadStore, SearchQuery, StoredLead
-from ..storage.decisions import Decision, DecisionLog, RunRecord
+from ..storage.decisions import ACCEPTED, Decision, DecisionLog, RunRecord
 from .models import (
     BuyBoxView,
     HuntOutcome,
@@ -370,6 +370,11 @@ class EngineService:
                     lead_config=self.lead_config,
                     budget=budget,
                     store=store,
+                    # The service opened this run, so it passes the id in and
+                    # closes it below. run_hunt records the per-property
+                    # decisions against it rather than opening a second one.
+                    decisions=log,
+                    run_id=run.run_id if run is not None else None,
                 )
             except Exception as exc:  # noqa: BLE001 - a run reports, never vanishes
                 outcome.error = f"the hunt failed: {exc}"
@@ -381,14 +386,16 @@ class EngineService:
             outcome.notices.extend(result.warnings)
 
             if log is not None and run is not None:
-                seen = len(result.report.results) if result.report is not None else 0
-                accepted = sum(1 for e in result.prioritized if e.is_hot_lead)
+                # Counted from the decisions actually written, not guessed at
+                # from the result: those two disagreeing is exactly the kind
+                # of thing a run history is supposed to settle.
+                recorded = log.for_run(run.run_id)
                 log.finish_run(
                     run,
                     status="OK",
-                    leads_seen=seen,
-                    leads_accepted=accepted,
-                    leads_rejected=max(seen - accepted, 0),
+                    leads_seen=len(recorded),
+                    leads_accepted=sum(1 for d in recorded if d.outcome == ACCEPTED),
+                    leads_rejected=sum(1 for d in recorded if d.was_rejected),
                     api_requests_spent=(
                         result.usage.research_calls + result.usage.comp_calls
                     ),
