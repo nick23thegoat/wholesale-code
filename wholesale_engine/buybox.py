@@ -38,6 +38,7 @@ from .config import (
     MIN_PROPERTY_PRICE,
     TARGET_WHOLESALE_FEE,
 )
+from .providers.criteria import HuntCriteria
 
 #: Where the buy box lives. Outside the package on purpose.
 DEFAULT_PATH = Path(__file__).resolve().parent.parent / "config" / "buybox.json"
@@ -48,6 +49,37 @@ PATH_VAR = "BUYBOX_PATH"
 ALLOWED_PROPERTY_TYPES = (
     "single_family", "duplex", "triplex", "fourplex", "townhouse", "condo",
     "multi_family", "mobile",
+)
+
+#: Settings :meth:`BuyBox.to_criteria` actually applies. Each one maps onto a
+#: field :class:`HuntCriteria` already has and the funnel already filters on,
+#: so the buy box supplies inputs to existing rules rather than adding rules.
+APPLIED_FIELDS = (
+    "states", "counties", "cities", "zip_codes", "property_types",
+    "min_price", "max_price", "min_equity",
+    "min_lead_score", "min_deal_score", "required_signals",
+)
+
+#: Settings that describe the buy box rather than filtering with it.
+DESCRIPTIVE_FIELDS = ("name", "notes", "enabled")
+
+#: Shape filters with no implementation anywhere in the engine yet. They are
+#: valid to store and valid to save — the web form should let you set them —
+#: but nothing filters on them, so a buy box carrying one is quieter than the
+#: person setting it expects. :meth:`unsupported_settings` says so out loud.
+NOT_IMPLEMENTED_FIELDS = (
+    "min_beds", "max_beds", "min_baths", "min_sqft", "max_sqft",
+    "min_year_built", "max_year_built",
+)
+
+#: Settings the engine *does* honour, but which reach it from somewhere other
+#: than HuntCriteria — ``min_signal_count`` from LeadHunterConfig, the two fee
+#: figures from EngineConfig. Putting them in the buy box does not move them,
+#: so setting one here and expecting a hunt to change is a trap. Reported for
+#: the same reason as the group above: a filter you think is on and is not is
+#: worse than one you know is off.
+NOT_ROUTED_FIELDS = (
+    "min_signal_count", "target_wholesale_fee", "min_viable_wholesale_fee",
 )
 
 
@@ -216,6 +248,69 @@ class BuyBox:
         return not self.validate()
 
     # ------------------------------------------------------------------
+    # Conversion into what the engine already understands
+    # ------------------------------------------------------------------
+
+    def to_criteria(self, limit: Optional[int] = None) -> HuntCriteria:
+        """This buy box as :class:`HuntCriteria`.
+
+        The conversion is deliberately dull: each of the eleven applied
+        settings maps onto a criteria field the funnel already filters on. No
+        rule is implemented here and none is duplicated — the buy box supplies
+        inputs to ``cheap_filter`` and ``apply_filters``, which keep owning the
+        decisions.
+
+        The seven shape filters in :data:`NOT_IMPLEMENTED_FIELDS` are **not**
+        carried across, because there is nowhere to carry them to yet.
+        :meth:`unsupported_settings` reports any that are set rather than
+        letting them look applied.
+        """
+        return HuntCriteria(
+            states=tuple(self.states),
+            counties=tuple(self.counties),
+            cities=tuple(self.cities),
+            zip_codes=tuple(self.zip_codes),
+            property_types=tuple(self.property_types),
+            min_price=self.min_price,
+            max_price=self.max_price,
+            min_equity=self.min_equity,
+            required_signals=tuple(self.required_signals),
+            min_lead_score=self.min_lead_score or 0.0,
+            min_deal_score=self.min_deal_score or 0.0,
+            limit=limit,
+        )
+
+    def unsupported_settings(self) -> List[str]:
+        """Settings this buy box carries that no hunt will act on.
+
+        Only fields actually **set** are reported, so a buy box that leaves
+        them alone produces no noise. Both groups are legitimate to store and
+        legitimate to save; what would not be legitimate is letting someone
+        set a minimum bedroom count, watch a hunt run, and assume it was
+        applied.
+        """
+        blank = BuyBox()
+        problems: List[str] = []
+
+        for name in NOT_IMPLEMENTED_FIELDS:
+            value = getattr(self, name, None)
+            if value is not None and value != getattr(blank, name, None):
+                problems.append(
+                    f"{name}={value} is NOT APPLIED: no filter for it exists yet. "
+                    "It is stored and will start working when one does."
+                )
+
+        for name in NOT_ROUTED_FIELDS:
+            value = getattr(self, name, None)
+            if value is not None and value != getattr(blank, name, None):
+                problems.append(
+                    f"{name}={value} is NOT APPLIED by the buy box: the engine "
+                    "honours it, but from its own configuration rather than "
+                    "from here."
+                )
+        return problems
+
+    # ------------------------------------------------------------------
     # Serialization
     # ------------------------------------------------------------------
 
@@ -284,6 +379,11 @@ class BuyBox:
 
         box, warnings = cls.from_dict(raw)
         warnings.extend(f"buy box: {p}" for p in box.validate())
+        # Not validation failures — these settings are valid to store. They
+        # are reported here because the existing warnings channel is what
+        # every caller already prints, and a filter silently not running is
+        # exactly the kind of thing that channel is for.
+        warnings.extend(f"buy box: {p}" for p in box.unsupported_settings())
         return box, warnings
 
     def save(self, path: Optional[Path] = None) -> Path:

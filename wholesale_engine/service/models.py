@@ -162,6 +162,9 @@ class BuyBoxView:
     warnings: List[str] = field(default_factory=list)
     #: False when the file does not exist and these are the defaults.
     exists: bool = False
+    #: Settings stored here that no hunt will act on. Also folded into
+    #: ``warnings`` so callers that only print those still see them.
+    unsupported: List[str] = field(default_factory=list)
 
     @property
     def search_count(self) -> int:

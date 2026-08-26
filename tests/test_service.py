@@ -395,10 +395,22 @@ class BuyBoxAccess(ServiceCase):
         self.assertTrue(view.buy_box.is_valid)
         self.assertTrue(any("could not read" in w for w in view.warnings))
 
-    def test_reading_the_buy_box_does_not_wire_it_into_a_hunt_yet(self):
-        # Explicit: this layer exposes the buy box, it does not apply it.
-        # Applying it is a separate, approved-in-its-own-right change.
-        self.assertFalse(hasattr(BuyBox, "to_criteria"))
+    def test_the_buy_box_converts_to_criteria_the_funnel_understands(self):
+        self.service.save_buy_box(
+            {"name": "tampa", "states": ["FL"], "zip_codes": ["33607"]}
+        )
+        criteria = self.service.read_buy_box().buy_box.to_criteria()
+        self.assertEqual(criteria.states, ("FL",))
+        self.assertEqual(criteria.zip_codes, ("33607",))
+
+    def test_the_seven_shape_filters_are_still_not_carried_across(self):
+        # The scope line for this change: the buy box can store them, and
+        # to_criteria must not pretend they filter anything.
+        from wholesale_engine.buybox import NOT_IMPLEMENTED_FIELDS
+
+        criteria = BuyBox(min_beds=3, min_sqft=900).to_criteria()
+        for name in NOT_IMPLEMENTED_FIELDS:
+            self.assertFalse(hasattr(criteria, name), name)
 
 
 # ---------------------------------------------------------------------------

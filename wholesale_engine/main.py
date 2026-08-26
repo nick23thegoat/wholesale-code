@@ -69,6 +69,7 @@ from wholesale_engine.automation import (  # noqa: E402
 )
 from wholesale_engine.backup import create_backup  # noqa: E402
 from wholesale_engine.budget import ApiBudget  # noqa: E402
+from wholesale_engine.buybox import BuyBox  # noqa: E402
 from wholesale_engine.hunt import HuntBudget, run_hunt  # noqa: E402
 from wholesale_engine.importer import ImportError_, run_import  # noqa: E402
 from wholesale_engine.integrations import (  # noqa: E402
@@ -255,6 +256,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--list-sources",
         action="store_true",
         help="show every provider and whether it is configured, then exit",
+    )
+    hunt.add_argument(
+        "--buybox", nargs="?", const="", default=None, metavar="PATH",
+        help=(
+            "run the saved buy box (config/buybox.json, or PATH). Any flag you "
+            "also pass overrides the matching buy box setting for this run"
+        ),
     )
     hunt.add_argument("--counties", help="comma-separated counties to search")
     hunt.add_argument("--cities", help="comma-separated cities to search")
@@ -696,10 +704,49 @@ def _first_set(*values: Optional[float]) -> Optional[float]:
     return resolve_price_band(*values)
 
 
+def load_buy_box(
+    args: argparse.Namespace, service: "EngineService"
+) -> Optional["BuyBox"]:
+    """The saved buy box for this run, or ``None`` when ``--buybox`` was not given.
+
+    Without the flag nothing is read and nothing changes — a run behaves
+    exactly as it did before the buy box existed.
+
+    With it, warnings go to stderr and the run continues. That is deliberate
+    and matches ``BuyBox.load``: a bad file yields working defaults rather
+    than a dead run, because this is scheduled to run unattended and a hunt
+    that stops at 3am because a field was mistyped from a phone is worse than
+    one that runs slightly wider than intended and says so.
+    """
+    if getattr(args, "buybox", None) is None:
+        return None
+    view = service.read_buy_box(Path(args.buybox) if args.buybox else None)
+    if not view.exists:
+        print(f"No buy box at {view.path}; using defaults.", file=sys.stderr)
+    for warning in view.warnings:
+        print(f"  {warning}", file=sys.stderr)
+    if not view.buy_box.enabled:
+        print(
+            f"  buy box '{view.buy_box.name}' is disabled (enabled=false); "
+            "its settings still apply to this run because you asked for it "
+            "explicitly.",
+            file=sys.stderr,
+        )
+    return view.buy_box
+
+
 def criteria_from_args(
-    args: argparse.Namespace, lead_config: LeadHunterConfig
+    args: argparse.Namespace,
+    lead_config: LeadHunterConfig,
+    buy_box: Optional["BuyBox"] = None,
 ) -> HuntCriteria:
-    """Build the search criteria from the command line."""
+    """Build the search criteria from the command line.
+
+    A flag that was not given arrives as ``None``, which is what lets the
+    service tell "the user asked for this" from "the user said nothing" and
+    fall back to ``buy_box`` for the second. The ordering itself lives in the
+    service; this function only reports what was typed.
+    """
     signals = tuple(
         field for flag, field in SIGNAL_FLAGS.items() if getattr(args, flag, False)
     )
@@ -718,6 +765,7 @@ def criteria_from_args(
         required_signals=signals,
         min_lead_score=args.min_lead_score,
         min_deal_score=args.min_deal_score,
+        buy_box=buy_box,
     )
 
 
@@ -731,14 +779,13 @@ def run_hunt_cli(args: argparse.Namespace, engine_config: EngineConfig) -> int:
     made the calls itself.
     """
     lead_config = lead_config_from_args(args)
-    criteria = criteria_from_args(args, lead_config)
-
     service = EngineService(
         db_path=args.db or DEFAULT_DB_PATH,
         output_dir=args.out_dir or DEFAULT_OUTPUT_DIR,
         engine_config=engine_config,
         lead_config=lead_config,
     )
+    criteria = criteria_from_args(args, lead_config, buy_box=load_buy_box(args, service))
     outcome = service.run_hunt(
         HuntRequest(
             criteria=criteria,
@@ -1723,7 +1770,13 @@ def run_production_cli(
             report = run_daily(
                 store,
                 provider=provider,
-                criteria=criteria_from_args(args, lead_config_from_args(args)),
+                criteria=criteria_from_args(
+                    args,
+                    lead_config_from_args(args),
+                    # --daily runs the same funnel, so --buybox has to
+                    # mean the same thing here as it does for --hunt.
+                    buy_box=load_buy_box(args, EngineService()),
+                ),
                 engine_config=config,
                 lead_config=lead_config_from_args(args),
                 budget=budget,

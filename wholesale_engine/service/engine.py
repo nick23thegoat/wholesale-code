@@ -261,6 +261,7 @@ class EngineService:
         min_lead_score: Optional[float] = None,
         min_deal_score: Optional[float] = None,
         limit: Optional[int] = None,
+        buy_box: Optional[BuyBox] = None,
     ) -> HuntCriteria:
         """Assemble criteria from plain values, applying the same defaults.
 
@@ -273,22 +274,64 @@ class EngineService:
         "not specified". A CLI splitter that returns ``None`` for an absent
         flag and a web form that omits the field should not need to know the
         difference.
+
+        ``buy_box`` supplies a default for anything not specified here. The
+        precedence is one rule applied uniformly: **an explicit value wins,
+        the buy box fills the rest, and the engine's own defaults fill what is
+        left.** So a saved buy box is the standing configuration and a flag is
+        a deliberate override of it for one run, which is the only ordering
+        that makes a scheduled run and a hand-typed one predictable.
+
+        This is the single place that ordering exists. The CLI does not
+        re-implement it and neither should anything else.
         """
+        source = buy_box.to_criteria() if buy_box is not None else None
+
+        def pick(explicit, from_box):
+            """Explicit value, else the buy box's, else nothing."""
+            if explicit is not None:
+                return explicit
+            return from_box
+
+        def pick_seq(explicit, from_box):
+            """Same rule for sequences, where empty also means unspecified."""
+            if explicit:
+                return tuple(explicit)
+            return tuple(from_box or ())
+
         return HuntCriteria(
-            states=tuple(states or ()) or self.lead_config.target_states,
-            counties=tuple(counties or ()),
-            cities=tuple(cities or ()),
-            zip_codes=tuple(zip_codes or ()),
-            property_types=tuple(property_types or ())
-            or self.lead_config.preferred_property_types,
-            min_price=resolve_price_band(min_price, default=MIN_PROPERTY_PRICE),
-            max_price=resolve_price_band(
-                max_price, max_asking_price, default=MAX_PROPERTY_PRICE
+            states=(
+                pick_seq(states, source.states if source else ())
+                or self.lead_config.target_states
             ),
-            min_equity=min_equity,
-            required_signals=tuple(required_signals or ()),
-            min_lead_score=min_lead_score or 0.0,
-            min_deal_score=min_deal_score or 0.0,
+            counties=pick_seq(counties, source.counties if source else ()),
+            cities=pick_seq(cities, source.cities if source else ()),
+            zip_codes=pick_seq(zip_codes, source.zip_codes if source else ()),
+            property_types=(
+                pick_seq(property_types, source.property_types if source else ())
+                or self.lead_config.preferred_property_types
+            ),
+            min_price=resolve_price_band(
+                min_price,
+                source.min_price if source else None,
+                default=MIN_PROPERTY_PRICE,
+            ),
+            max_price=resolve_price_band(
+                max_price,
+                max_asking_price,
+                source.max_price if source else None,
+                default=MAX_PROPERTY_PRICE,
+            ),
+            min_equity=pick(min_equity, source.min_equity if source else None),
+            required_signals=pick_seq(
+                required_signals, source.required_signals if source else ()
+            ),
+            min_lead_score=pick(
+                min_lead_score, source.min_lead_score if source else None
+            ) or 0.0,
+            min_deal_score=pick(
+                min_deal_score, source.min_deal_score if source else None
+            ) or 0.0,
             limit=limit,
         )
 
@@ -460,7 +503,8 @@ class EngineService:
         target = Path(path) if path else self.buy_box_path()
         box, warnings = BuyBox.load(target)
         return BuyBoxView(
-            buy_box=box, path=target, warnings=warnings, exists=target.exists()
+            buy_box=box, path=target, warnings=warnings, exists=target.exists(),
+            unsupported=box.unsupported_settings(),
         )
 
     def save_buy_box(
