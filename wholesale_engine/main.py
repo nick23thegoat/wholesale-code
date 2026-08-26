@@ -158,15 +158,24 @@ from wholesale_engine.reports import (  # noqa: E402
     write_lead_pipeline_csv,
 )
 
-PACKAGE_ROOT = Path(__file__).resolve().parent
-SAMPLE_PROPERTIES = PACKAGE_ROOT / "data" / "sample_properties.csv"
-SAMPLE_COMPS = PACKAGE_ROOT / "data" / "sample_comps.csv"
-DEFAULT_OUTPUT = PACKAGE_ROOT / "reports" / "output" / "deal_analysis.csv"
-SAMPLE_LEADS = PACKAGE_ROOT / "data" / "lead_sources" / "sample_leads.csv"
-SAMPLE_LEAD_COMPS = PACKAGE_ROOT / "data" / "lead_sources" / "sample_lead_comps.csv"
-DEFAULT_LEAD_OUTPUT = PACKAGE_ROOT / "reports" / "output" / "lead_pipeline.csv"
-DEFAULT_OUTPUT_DIR = PACKAGE_ROOT / "reports" / "output"
-DEFAULT_HOT_OUTPUT = PACKAGE_ROOT / "reports" / "output" / "hot_leads.csv"
+# Bundled paths and default output locations live in the service layer, so a
+# scheduled job and a web request resolve them the same way the CLI does.
+# Re-exported here because the CLI and its tests have always referred to them
+# by these names.
+from wholesale_engine.service import (  # noqa: E402
+    DEFAULT_HOT_OUTPUT,
+    DEFAULT_LEAD_OUTPUT,
+    DEFAULT_OUTPUT,
+    DEFAULT_OUTPUT_DIR,
+    PACKAGE_ROOT,
+    SAMPLE_COMPS,
+    SAMPLE_LEAD_COMPS,
+    SAMPLE_LEADS,
+    SAMPLE_PROPERTIES,
+    EngineService,
+    HuntRequest,
+    resolve_price_band,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -680,14 +689,11 @@ SIGNAL_FLAGS = {
 def _first_set(*values: Optional[float]) -> Optional[float]:
     """The first value that was actually given. Used to resolve the price band.
 
-    ``--min-price``/``--max-price`` win, then the older ``--max-asking-price``,
-    then the configured search range. The range is a BUYER-CAPACITY ceiling,
-    not a deal rule — everything inside it is still underwritten normally.
+    The precedence itself lives in the service layer so the CLI, a scheduled
+    run and a web form all resolve a price band identically. This stays as a
+    named CLI helper because the tests and the query builder below use it.
     """
-    for value in values:
-        if value is not None:
-            return value
-    return None
+    return resolve_price_band(*values)
 
 
 def criteria_from_args(
@@ -697,97 +703,68 @@ def criteria_from_args(
     signals = tuple(
         field for flag, field in SIGNAL_FLAGS.items() if getattr(args, flag, False)
     )
-    return HuntCriteria(
-        states=_split(args.states) or lead_config.target_states,
-        counties=_split(args.counties) or (),
-        cities=_split(args.cities) or (),
-        zip_codes=_split(args.zip_codes) or (),
-        property_types=_split(args.property_types) or lead_config.preferred_property_types,
-        min_price=_first_set(args.min_price, MIN_PROPERTY_PRICE),
-        max_price=_first_set(
-            args.max_price, getattr(args, "max_asking_price", None), MAX_PROPERTY_PRICE
-        ),
+    # Translate the Namespace into plain values; the service assembles them.
+    # This function exists to know about argparse so the service never has to.
+    return EngineService(lead_config=lead_config).build_criteria(
+        states=_split(args.states),
+        counties=_split(args.counties),
+        cities=_split(args.cities),
+        zip_codes=_split(args.zip_codes),
+        property_types=_split(args.property_types),
+        min_price=args.min_price,
+        max_price=args.max_price,
+        max_asking_price=getattr(args, "max_asking_price", None),
         min_equity=args.min_equity,
         required_signals=signals,
-        min_lead_score=args.min_lead_score or 0.0,
-        min_deal_score=args.min_deal_score or 0.0,
+        min_lead_score=args.min_lead_score,
+        min_deal_score=args.min_deal_score,
     )
 
 
 def run_hunt_cli(args: argparse.Namespace, engine_config: EngineConfig) -> int:
-    """``--hunt``: provider search through to the four output files."""
+    """``--hunt``: provider search through to the four output files.
+
+    Every step of the run itself now lives in :class:`EngineService`. What is
+    left here is what the CLI is actually for: reading the Namespace, and
+    printing. Notices are handed to the service as a callback so they reach
+    stderr at the moment they happen, exactly as they did when this function
+    made the calls itself.
+    """
     lead_config = lead_config_from_args(args)
     criteria = criteria_from_args(args, lead_config)
 
-    settings = ProviderSettings.from_env()
-    requested = (args.source or "csv").strip().lower()
-
-    # Each adapter declares the variables it needs, so the fallback message
-    # names the right ones instead of a generic pair. An unknown name falls
-    # through to get_provider, which lists what is registered.
-    entry = registration(requested)
-    missing = entry.missing_settings(settings) if entry else []
-    if entry is not None and missing:
-        print(NO_PROVIDER_MESSAGE, file=sys.stderr)
-        print(
-            f"  '{requested}' needs {', '.join(missing)}. "
-            "Copy .env.example to .env and fill it in.",
-            file=sys.stderr,
-        )
-        print("  Falling back to the local CSV source for this run.", file=sys.stderr)
-        requested = "csv"
-
-    # Resolved after the fallback, so an unconfigured live source lands on a
-    # working CSV run rather than on an error about a missing file.
-    csv_path = args.leads or (SAMPLE_LEADS if requested == "csv" else None)
-    comps_path = args.lead_comps or (
-        SAMPLE_LEAD_COMPS if csv_path == SAMPLE_LEADS else None
+    service = EngineService(
+        db_path=args.db or DEFAULT_DB_PATH,
+        output_dir=args.out_dir or DEFAULT_OUTPUT_DIR,
+        engine_config=engine_config,
+        lead_config=lead_config,
     )
-    if requested == "csv" and csv_path == SAMPLE_LEADS and not args.leads:
-        print(
-            "No --leads file given; hunting the bundled FICTIONAL sample lead list.",
-            file=sys.stderr,
-        )
+    outcome = service.run_hunt(
+        HuntRequest(
+            criteria=criteria,
+            source=args.source or "csv",
+            leads_path=args.leads,
+            comps_path=args.lead_comps,
+            research_limit=args.research_limit,
+            comps_limit=args.comps_limit,
+            db_path=args.db or DEFAULT_DB_PATH,
+            write_outputs=True,
+            output_dir=args.out_dir or DEFAULT_OUTPUT_DIR,
+            write_json=not args.no_json,
+        ),
+        on_notice=lambda message: print(message, file=sys.stderr),
+    )
 
-    try:
-        provider = get_provider(
-            requested, settings=settings, csv_path=csv_path, comps_path=comps_path
-        )
-    except ProviderNotConfigured as exc:
-        print(f"{exc}", file=sys.stderr)
+    if not outcome.ok:
+        print(outcome.error, file=sys.stderr)
         return 2
 
-    budget = HuntBudget.from_api_budget(ApiBudget.from_env())
-    if args.research_limit is not None:
-        budget.research_limit = args.research_limit
-    if args.comps_limit is not None:
-        budget.comps_limit = args.comps_limit
-
-    db_path = args.db or DEFAULT_DB_PATH
-    store = LeadStore(db_path)
-    try:
-        result = run_hunt(
-            provider,
-            criteria,
-            engine_config=engine_config,
-            lead_config=lead_config,
-            budget=budget,
-            store=store,
-        )
-    finally:
-        store.close()
-
     if not args.quiet:
-        print(render_hunt_summary(result))
-
-    written = write_hunt_outputs(
-        result, args.out_dir or DEFAULT_OUTPUT_DIR, write_json=not args.no_json
-    )
-    if not args.quiet:
+        print(render_hunt_summary(outcome.result))
         print()
-        for label in sorted(written):
-            print(f"{label:<20} -> {written[label]}")
-        print(f"{'lead database':<20} -> {db_path}")
+        for label in sorted(outcome.written):
+            print(f"{label:<20} -> {outcome.written[label]}")
+        print(f"{'lead database':<20} -> {outcome.db_path}")
     return 0
 
 
