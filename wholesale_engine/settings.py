@@ -31,6 +31,7 @@ ENV_VARS = (
     "MAX_SKIP_TRACES",
     "MAX_REACH",
     "MAX_RENTCAST",
+    "RENTCAST_SEARCH_RESERVE",
     "MIN_PROPERTY_PRICE",
     "MAX_PROPERTY_PRICE",
     "RENTCAST_API_KEY",
@@ -42,6 +43,8 @@ ENV_VARS = (
     "PUBLIC_RECORDS_API_KEY",
     "COMPS_API_KEY",
     "SKIP_TRACE_API_KEY",
+    "BATCHDATA_API_KEY",
+    "SKIP_TRACE_COST_PER_LOOKUP",
 )
 
 #: Where a local .env is looked for, relative to the repository root.

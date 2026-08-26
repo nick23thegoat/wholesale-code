@@ -228,12 +228,39 @@ class SkipTraceTests(unittest.TestCase):
         self.assertIn("never generate", message)
         self.assertIn("DNC", message)
 
-    def test_no_paid_vendor_is_registered(self):
-        # 'http' is a template that refuses to construct without credentials
-        # AND a vendor subclass. No vendor ships wired in.
-        from wholesale_engine.acquisitions import SKIP_TRACE_PROVIDERS
+    def test_registered_is_not_the_same_as_connected(self):
+        # A vendor adapter shipping in the registry does not mean anyone can
+        # dial an owner: every non-mock entry must refuse to construct without
+        # its own credentials. 'none' refuses always, 'mock' is fictional, and
+        # 'http' additionally needs a vendor subclass.
+        import os
 
-        self.assertEqual(set(SKIP_TRACE_PROVIDERS), {"none", "mock", "http"})
+        from wholesale_engine.acquisitions import (
+            SKIP_TRACE_PROVIDERS,
+            get_skip_trace_provider,
+        )
+
+        self.assertEqual(
+            set(SKIP_TRACE_PROVIDERS), {"none", "mock", "http", "batchdata"}
+        )
+
+        credential_vars = ("SKIP_TRACE_API_KEY", "SKIP_TRACE_BASE_URL",
+                           "BATCHDATA_API_KEY")
+        saved = {name: os.environ.pop(name, None) for name in credential_vars}
+        try:
+            for name in ("http", "batchdata"):
+                with self.assertRaises(SkipTraceNotConfigured, msg=name):
+                    get_skip_trace_provider(name)
+        finally:
+            for name, value in saved.items():
+                if value is not None:
+                    os.environ[name] = value
+
+    def test_the_default_provider_still_refuses(self):
+        from wholesale_engine.acquisitions import get_skip_trace_provider
+
+        with self.assertRaises(SkipTraceNotConfigured):
+            get_skip_trace_provider().skip_trace("k")
 
     def test_the_http_template_refuses_without_credentials(self):
         from wholesale_engine.acquisitions import get_skip_trace_provider

@@ -318,12 +318,23 @@ class HttpSkipTraceProvider(SkipTraceProvider):
         return self.parse_result(payload, property_id)
 
 
-#: Registry for ``SKIP_TRACE_PROVIDER``. Only ``none`` and ``mock`` are usable;
-#: adding a real one means implementing the interface against its documentation.
+def _batchdata_provider() -> SkipTraceProvider:
+    """Imported lazily so this module stays free of vendor imports."""
+    from .batchdata import BatchDataSkipTraceProvider
+
+    return BatchDataSkipTraceProvider()
+
+
+#: Registry for ``SKIP_TRACE_PROVIDER``. ``none`` refuses, ``mock`` fabricates
+#: obviously fake data, ``http`` is an unfinished template, and ``batchdata``
+#: is a real vendor that is only usable once BATCHDATA_API_KEY is set.
+#: Registered is not connected: an adapter with no credentials raises
+#: SkipTraceNotConfigured rather than pretending.
 SKIP_TRACE_PROVIDERS = {
     "none": UnconfiguredSkipTraceProvider,
     "mock": MockSkipTraceProvider,
     "http": HttpSkipTraceProvider,
+    "batchdata": _batchdata_provider,
 }
 
 
@@ -345,6 +356,12 @@ def skip_trace_status() -> str:
             state = "REFUSES — the safe default"
         elif name == "mock":
             state = "TEST DATA ONLY — fictional 555-01xx numbers"
+        elif name == "batchdata":
+            state = (
+                "CONFIGURED — live vendor, billed per lookup"
+                if os.environ.get("BATCHDATA_API_KEY", "").strip()
+                else "NOT CONNECTED — needs BATCHDATA_API_KEY"
+            )
         elif os.environ.get("SKIP_TRACE_API_KEY", "").strip() and os.environ.get(
             "SKIP_TRACE_BASE_URL", ""
         ).strip():
@@ -354,12 +371,15 @@ def skip_trace_status() -> str:
         lines.append(f"  {name:<18}{state}")
     lines.append("")
     lines.append(
-        "  No paid vendor ships wired in. Before connecting one: confirm the "
-        "terms permit your use, and put consent"
+        "  A registered vendor is not a connected one: without its key it "
+        "refuses rather than pretending. Before"
     )
     lines.append(
-        "  tracking and DNC scrubbing in place. The engine maintains the "
-        "suppression list; the rest is on you."
+        "  you dial anyone: confirm the vendor's terms permit your use, and put "
+        "consent tracking and DNC scrubbing in"
+    )
+    lines.append(
+        "  place. The engine maintains the suppression list; the rest is on you."
     )
     return "\n".join(lines)
 
@@ -369,8 +389,8 @@ def get_skip_trace_provider(name: str = "none") -> SkipTraceProvider:
     if key not in SKIP_TRACE_PROVIDERS:
         raise SkipTraceNotConfigured(
             f"unknown skip-trace provider '{name}'. Available: "
-            f"{', '.join(sorted(SKIP_TRACE_PROVIDERS))}. No paid vendor is wired "
-            "in — adding one means reading that vendor's API documentation and "
-            "meeting its compliance requirements first."
+            f"{', '.join(sorted(SKIP_TRACE_PROVIDERS))}. Adding another means "
+            "reading that vendor's API documentation and meeting its compliance "
+            "requirements first."
         )
     return SKIP_TRACE_PROVIDERS[key]()

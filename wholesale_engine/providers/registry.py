@@ -8,6 +8,7 @@ declares.
 Three entries ship:
 
 ``csv``             local files, no credentials, no cost — the TEST-mode default
+``rentcast``        the RentCast adapter; needs ``RENTCAST_API_KEY``
 ``propertyreach``   the PropertyReach adapter; needs ``PROPERTYREACH_API_KEY``
 ``http-template``   a finished transport with no vendor behind it
 
@@ -47,6 +48,9 @@ from .metrics import ProviderMetrics
 from .propertyreach import PropertyReachProvider
 from .propertyreach import build as _propertyreach_factory
 from .propertyreach_schema import API_KEY_VAR as PROPERTYREACH_API_KEY_VAR
+from .rentcast import RentCastProvider
+from .rentcast import build as _rentcast_factory
+from .rentcast_schema import API_KEY_VAR as RENTCAST_API_KEY_VAR
 
 #: factory(settings, csv_path, comps_path, metrics) -> PropertyDataProvider
 Factory = Callable[..., PropertyDataProvider]
@@ -134,7 +138,7 @@ def providers_for(capability: Capability) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# The two adapters that ship
+# The adapters that ship
 # ---------------------------------------------------------------------------
 
 
@@ -173,6 +177,12 @@ register(
     capabilities=PropertyReachProvider.capabilities,
     required_settings=(PROPERTYREACH_API_KEY_VAR,),
     documentation=PropertyReachProvider.documentation_note,
+)
+register(
+    "rentcast", _rentcast_factory, RentCastProvider.description,
+    capabilities=RentCastProvider.capabilities,
+    required_settings=(RENTCAST_API_KEY_VAR,),
+    documentation=RentCastProvider.documentation_note,
 )
 register(
     "http-template", _http_template_factory, HttpPropertyDataProvider.description,
