@@ -587,6 +587,21 @@ class EngineService:
             if should_close:
                 store.close()
 
+    def run_outcome_counts(self, run_id: int) -> Dict[str, int]:
+        """``{outcome: count}`` for one run — ACCEPTED, REJECTED, INCOMPLETE.
+
+        The ``runs`` table carries accepted and rejected but not incomplete,
+        and "analyzed but missing data" is a different answer from either. It
+        is grouped in SQL so the number stays right on a run larger than one
+        page of decisions.
+        """
+        store, should_close = self._open_store()
+        try:
+            return DecisionLog(store.connection).outcome_counts(run_id)
+        finally:
+            if should_close:
+                store.close()
+
     def decisions_for_run(self, run_id: int, limit: int = 500) -> List[Decision]:
         store, should_close = self._open_store()
         try:

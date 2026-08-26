@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Leads{% endblock %}
+{% block body %}
+<h1>Leads</h1>
+
+<details class="filters" {% if filtered %}open{% endif %}>
+  <summary>Filter &amp; sort</summary>
+  <form method="get" action="{{ url_for('leads') }}">
+    <label>Search<input type="search" name="q" value="{{ request.args.get('q','') }}" placeholder="address, city, county"></label>
+    <div class="pair">
+      <label>States<input name="states" value="{{ request.args.get('states','') }}" placeholder="FL,TX"></label>
+      <label>Status
+        <select name="status">
+          <option value="">any</option>
+          {% for s in statuses %}
+          <option value="{{ s }}" {% if request.args.get('status')==s %}selected{% endif %}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    <div class="pair">
+      <label>Min deal score<input type="number" name="min_deal_score" value="{{ request.args.get('min_deal_score','') }}" inputmode="numeric"></label>
+      <label>Min fee<input type="number" name="min_fee" value="{{ request.args.get('min_fee','') }}" inputmode="numeric"></label>
+    </div>
+    <label>Sort by
+      <select name="sort_by">
+        {% for key in sort_keys %}
+        <option value="{{ key }}" {% if query.sort_by==key %}selected{% endif %}>{{ key.replace('_',' ') }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="check"><input type="checkbox" name="open_only" value="1" {% if query.exclude_closed %}checked{% endif %}> Open leads only</label>
+    <div class="actions">
+      <button type="submit">Apply</button>
+      <a class="btn ghost" href="{{ url_for('leads') }}">Clear</a>
+    </div>
+  </form>
+</details>
+
+<p class="count">{{ rows|length }} propert{{ 'y' if rows|length == 1 else 'ies' }}{% if rows|length == query.limit %} (limit reached){% endif %}</p>
+
+{% if not rows %}
+  <p class="empty">Nothing stored yet. Run <code>--hunt</code> to bring leads in.</p>
+{% endif %}
+
+<ul class="cards">
+{% for row in rows %}
+  <li>
+    <a class="card" href="{{ url_for('property_detail', dedupe_key=row.dedupe_key) }}">
+      <div class="card-top">
+        <span class="addr">{{ row.address|text }}</span>
+        <span class="band {{ row.priority_band|band_class }}">{{ row.priority_band|text }}</span>
+      </div>
+      <p class="sub">{{ row.city|text }}{% if row.state %}, {{ row.state }}{% endif %} · {{ row.status|text }}</p>
+      <dl class="grid">
+        <div><dt>Lead</dt><dd>{{ row.lead_score|score }}</dd></div>
+        <div><dt>Deal</dt><dd>{{ row.deal_score|score }}</dd></div>
+        <div><dt>Priority</dt><dd>{{ row.priority_score|score }}</dd></div>
+        <div><dt>ARV</dt><dd>{{ row.arv|money }}</dd></div>
+        <div><dt>Repairs</dt><dd>{{ row.repair_estimate|money }}</dd></div>
+        <div><dt>MAO</dt><dd>{{ row.mao|money }}</dd></div>
+        <div><dt>Offer</dt><dd>{{ row.recommended_offer|money }}</dd></div>
+        <div><dt>Fee</dt><dd>{{ row.potential_fee|money }}</dd></div>
+        <div class="wide"><dt>Fee status</dt><dd>{{ row.fee_status|text }}</dd></div>
+      </dl>
+    </a>
+  </li>
+{% endfor %}
+</ul>
+{% endblock %}

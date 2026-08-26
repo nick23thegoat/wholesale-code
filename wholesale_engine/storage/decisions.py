@@ -279,6 +279,20 @@ class DecisionLog:
         ).fetchall()
         return [(row["stage"], row["reason"], row["n"]) for row in rows]
 
+    def outcome_counts(self, run_id: int) -> Dict[str, int]:
+        """``{outcome: count}`` for one run.
+
+        Grouped in SQL rather than counted from :meth:`for_run`, which caps at
+        500 rows — a real run screens more than that, and a count that quietly
+        stops at the cap is worse than no count at all.
+        """
+        rows = self.connection.execute(
+            "SELECT outcome, COUNT(*) AS n FROM decisions WHERE run_id = ? "
+            "GROUP BY outcome",
+            (int(run_id),),
+        ).fetchall()
+        return {row["outcome"]: row["n"] for row in rows}
+
     @staticmethod
     def _row_to_decision(row: sqlite3.Row) -> Decision:
         return Decision(

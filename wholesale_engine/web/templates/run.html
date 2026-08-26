@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Run {{ run.run_id }}{% endblock %}
+{% block body %}
+<p class="back"><a href="{{ url_for('runs') }}">&larr; Runs</a></p>
+<h1>Run {{ run.run_id }}</h1>
+<p><span class="band {{ run.status|status_class }}">{{ run.status }}</span>
+   <span class="pill">{{ run.trigger }}</span>
+   <span class="pill">{{ run.mode }}</span></p>
+{% if run.error %}<p class="err">{{ run.error }}</p>{% endif %}
+
+<section>
+  <h2>Summary</h2>
+  <dl class="grid">
+    <div><dt>Started</dt><dd>{{ run.started_at|when }}</dd></div>
+    <div><dt>Finished</dt><dd>{{ run.finished_at|when }}</dd></div>
+    <div><dt>Provider</dt><dd>{{ run.provider|text }}</dd></div>
+    <div><dt>Buy box</dt><dd>{{ run.buy_box|text }}</dd></div>
+    <div><dt>Seen</dt><dd>{{ run.leads_seen }}</dd></div>
+    <div><dt>Accepted</dt><dd>{{ counts.get(accepted, 0) }}</dd></div>
+    <div><dt>Rejected</dt><dd>{{ counts.get(rejected, 0) }}</dd></div>
+    <div><dt>Incomplete</dt><dd>{{ counts.get(incomplete, 0) }}</dd></div>
+    <div><dt>API requests</dt><dd>{{ run.api_requests_spent }}</dd></div>
+    <div><dt>Cache hits</dt><dd>{{ run.cache_hits }}</dd></div>
+  </dl>
+</section>
+
+<section>
+  <h2>Why properties were rejected</h2>
+  {% if not rejections %}
+    <p class="empty">No rejections recorded for this run.</p>
+  {% else %}
+    {% set total = rejections|sum(attribute=2) %}
+    <table class="reasons">
+      <thead><tr><th>Count</th><th>Stage</th><th>Reason</th></tr></thead>
+      <tbody>
+      {% for stage, reason, count in rejections %}
+        <tr>
+          <td class="num">{{ count }} <span class="pct">({{ (count / total * 100)|round|int }}%)</span></td>
+          <td><span class="pill">{{ stage }}</span></td>
+          <td>{{ reason }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="note">Grouped by reason. The property's own figures live in each
+      decision's detail, which keeps this a summary rather than a list.</p>
+  {% endif %}
+</section>
+{% endblock %}

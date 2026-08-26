@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>{% block title %}Wholesale{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="bar">
+  <nav>
+    <a href="{{ url_for('leads') }}" {% if active_page in ('leads','property_detail') %}class="on"{% endif %}>Leads</a>
+    <a href="{{ url_for('runs') }}" {% if active_page in ('runs','run_detail') %}class="on"{% endif %}>Runs</a>
+    <a href="{{ url_for('buybox') }}" {% if active_page == 'buybox' %}class="on"{% endif %}>Buy&nbsp;box</a>
+  </nav>
+</header>
+<main>
+{% block body %}{% endblock %}
+</main>
+<footer class="foot">
+  <p>Read-only. No authentication — never expose this to the public internet.</p>
+</footer>
+</body>
+</html>

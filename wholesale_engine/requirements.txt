@@ -1,8 +1,21 @@
-# The V1 engine runs on the Python standard library alone (Python 3.9+).
-# There is nothing to install to analyze deals:
+# The engine runs on the Python standard library alone (Python 3.9+).
+# There is nothing to install to analyze deals or to run a hunt:
 #
 #     python -m wholesale_engine.main --sample
 #
+# ---------------------------------------------------------------------
+# The web dashboard is the ONE thing with a real dependency.
+# ---------------------------------------------------------------------
+# Needed only for `python -m wholesale_engine.web`. The CLI does not import
+# it and does not need it installed.
+#
+#     pip install -r wholesale_engine/requirements.txt
+#
+# Bounded to the major version rather than pinned exactly: a patch release
+# should reach a server without a code change, a major one should not.
+# Tested against 3.1.3.
+Flask>=3.0,<4.0
+
 # Optional development tooling:
 pytest>=7.0          # nicer test runner; `python -m unittest` works without it
 # mypy>=1.0          # static type checking
