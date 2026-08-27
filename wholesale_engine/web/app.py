@@ -22,10 +22,13 @@ from ..buybox import (
 )
 from ..service import EngineService
 from ..storage import ACCEPTED, INCOMPLETE, LEAD_STATUSES, REJECTED, SORT_KEYS, SearchQuery
+from .bind import UnsafeBind, is_loopback
 from .formatting import FILTERS
 
-#: Only ever bound to the loopback address by :func:`run_dev_server`. A public
-#: bind on an app with no authentication is refused rather than warned about.
+#: Kept for callers that referred to it. The decision itself now lives in
+#: :mod:`wholesale_engine.web.bind`, shared with the production gunicorn
+#: configuration, because a bind guard with two implementations has one
+#: implementation and one bug waiting.
 SAFE_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 #: Rows per page. Small on purpose: this is read on a phone.
@@ -258,8 +261,8 @@ def run_dev_server(
     intended deployment is behind Tailscale, and even there an authentication
     layer belongs in front of it first.
     """
-    if host not in SAFE_HOSTS:
-        raise ValueError(
+    if not is_loopback(host):
+        raise UnsafeBind(
             f"refusing to bind {host}: this dashboard has no authentication, so "
             "binding anything other than the loopback address exposes every "
             "lead and owner name to anyone who can reach the port. Put it "

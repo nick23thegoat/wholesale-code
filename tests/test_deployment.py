@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import configparser
 import importlib
+import importlib.util
+import shutil
 import os
 import subprocess
 import sys
@@ -357,6 +359,419 @@ class DependenciesDeclared(unittest.TestCase):
             capture_output=True, text=True, check=True,
         )
         self.assertEqual(result.stdout.strip(), "[]", result.stdout)
+
+
+# ---------------------------------------------------------------------------
+# Audit fix 1 — an unsafe production bind is refused, not merely discouraged
+# ---------------------------------------------------------------------------
+
+
+class ProductionBindIsGuarded(unittest.TestCase):
+    """The dashboard has no authentication, so the bind IS the security control."""
+
+    UNSAFE = (
+        "0.0.0.0:8000",        # every IPv4 interface
+        "[::]:8000",           # every IPv6 interface
+        ":::8000",             # the same, unbracketed
+        "192.168.1.10:8000",   # a LAN interface
+        "203.0.113.9:8000",    # a public interface
+        "10.0.0.5:8000",
+        "8000",                # a bare port: gunicorn reads this as 0.0.0.0
+        ":8000",
+        "example.com:8000",    # a name that is not localhost
+        "0:8000",
+        "", "   ",             # unparseable fails closed, not open
+    )
+    SAFE = (
+        "127.0.0.1:8000", "localhost:8000", "[::1]:8000",
+        "127.0.0.53:9000",     # all of 127.0.0.0/8 is loopback
+        "unix:/run/wholesale.sock",   # not on the network at all
+    )
+
+    def test_every_unsafe_bind_is_rejected(self):
+        from wholesale_engine.web.bind import UnsafeBind, validate_bind
+
+        for spec in self.UNSAFE:
+            with self.assertRaises(UnsafeBind, msg=f"accepted {spec!r}"):
+                validate_bind(spec)
+
+    def test_loopback_and_unix_sockets_are_accepted(self):
+        from wholesale_engine.web.bind import validate_bind
+
+        for spec in self.SAFE:
+            self.assertEqual(validate_bind(spec), spec)
+
+    def test_the_refusal_explains_the_consequence_and_the_fix(self):
+        from wholesale_engine.web.bind import UnsafeBind, validate_bind
+
+        with self.assertRaises(UnsafeBind) as caught:
+            validate_bind("0.0.0.0:8000")
+        message = str(caught.exception)
+        self.assertIn("NO AUTHENTICATION", message)
+        self.assertIn("tailscale serve", message)
+        self.assertIn("funnel", message)
+
+    def test_the_gunicorn_config_fails_closed_on_an_unsafe_bind(self):
+        # The whole point of the fix: a line in /etc/wholesale/env must not be
+        # able to put owner records on the internet. Loading the config must
+        # raise, so gunicorn never starts and systemd reports the failure.
+        from wholesale_engine.web.bind import UnsafeBind
+
+        saved = os.environ.get("WEB_BIND")
+        os.environ["WEB_BIND"] = "0.0.0.0:8000"
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "gconf_unsafe", DEPLOY / "gunicorn.conf.py"
+            )
+            module = importlib.util.module_from_spec(spec)
+            with self.assertRaises(UnsafeBind):
+                spec.loader.exec_module(module)
+        finally:
+            os.environ.pop("WEB_BIND", None)
+            if saved is not None:
+                os.environ["WEB_BIND"] = saved
+
+    def test_the_gunicorn_config_accepts_a_loopback_override(self):
+        saved = os.environ.get("WEB_BIND")
+        os.environ["WEB_BIND"] = "127.0.0.1:9999"
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "gconf_safe", DEPLOY / "gunicorn.conf.py"
+            )
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            self.assertEqual(module.bind, "127.0.0.1:9999")
+        finally:
+            os.environ.pop("WEB_BIND", None)
+            if saved is not None:
+                os.environ["WEB_BIND"] = saved
+
+    def test_gunicorn_actually_exits_non_zero_on_an_unsafe_bind(self):
+        # Not just "the import raises" — the real binary must refuse to serve.
+        repo = Path(__file__).resolve().parent.parent
+        env = dict(os.environ, WEB_BIND="0.0.0.0:8000")
+        result = subprocess.run(
+            [sys.executable, "-m", "gunicorn", "--config",
+             str(DEPLOY / "gunicorn.conf.py"), "deploy.wsgi:application"],
+            cwd=str(repo), env=env, capture_output=True, text=True, timeout=60,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("NO AUTHENTICATION", result.stdout + result.stderr)
+
+    def test_the_dev_server_uses_the_same_guard(self):
+        # One implementation. Two would mean one of them drifts.
+        from wholesale_engine.web import app as web_app
+        from wholesale_engine.web.bind import UnsafeBind
+
+        for host in ("0.0.0.0", "::", "192.168.1.10", "example.com"):
+            with self.assertRaises(UnsafeBind, msg=host):
+                web_app.run_dev_server(host=host)
+
+    def test_the_runbook_does_not_suggest_widening_the_bind(self):
+        readme = (DEPLOY / "README.md").read_text()
+        self.assertNotIn("WEB_BIND=0.0.0.0", readme)
+
+
+# ---------------------------------------------------------------------------
+# Audit fix 2 — the documented restore actually restores
+# ---------------------------------------------------------------------------
+
+
+class DocumentedRestoreWorks(unittest.TestCase):
+    """Runs the code taken out of the runbook, in a VPS-shaped environment."""
+
+    def restore_snippet(self) -> str:
+        """The python the runbook tells you to run for a dry-run restore."""
+        readme = (DEPLOY / "README.md").read_text()
+        marker = "print(\"leads restored:\", sqlite3.connect(target).execute("
+        self.assertIn(marker, readme, "the runbook's dry-run block moved")
+        block = readme.split("**First, dry-run it into a scratch file.**")[1]
+        body = block.split("/opt/wholesale/venv/bin/python -c '")[1].split("'\n```")[0]
+        return body
+
+    def test_the_runbook_sets_pythonpath(self):
+        # The package is not pip-installed into the venv, and a restore is run
+        # from wherever the operator happens to be standing.
+        readme = (DEPLOY / "README.md").read_text()
+        restore = readme.split("### Restore")[1]
+        self.assertIn("PYTHONPATH=/opt/wholesale/wholesale-code", restore)
+        self.assertIn("ModuleNotFoundError", restore)
+
+    def test_the_package_is_not_pip_installable_so_pythonpath_is_required(self):
+        repo = Path(__file__).resolve().parent.parent
+        for name in ("pyproject.toml", "setup.py", "setup.cfg"):
+            self.assertFalse((repo / name).exists(), f"{name} appeared — revisit the runbook")
+
+    def test_backup_then_restore_into_an_empty_destination(self):
+        """backup -> fresh destination -> restore -> opens -> records present."""
+        import sqlite3
+
+        repo = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data, fresh = root / "data", root / "fresh"
+            data.mkdir()
+            fresh.mkdir()
+
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(repo)
+            env[paths.DATA_DIR_VAR] = str(data)
+
+            subprocess.run(
+                [sys.executable, "-m", "wholesale_engine.main", "--hunt",
+                 "--source", "csv", "--quiet", "--out-dir", str(root / "out")],
+                cwd=tmp, env=env, capture_output=True, text=True, check=True,
+            )
+            seeded = sqlite3.connect(data / "leads.db").execute(
+                "SELECT COUNT(*) FROM leads").fetchone()[0]
+            self.assertGreater(seeded, 0)
+
+            subprocess.run(
+                [sys.executable, "-m", "wholesale_engine.main", "--backup",
+                 "--backup-dir", str(data / "backups"), "--quiet"],
+                cwd=tmp, env=env, capture_output=True, text=True, check=True,
+            )
+
+            # Run the runbook's own code, from a working directory that is not
+            # the checkout — which is what broke before this fix.
+            target = fresh / "leads.db"
+            self.assertFalse(target.exists())
+            snippet = self.restore_snippet()
+            snippet = snippet.replace("/var/lib/wholesale/backups", str(data / "backups"))
+            snippet = snippet.replace("/tmp/restore-check.db", str(target))
+            result = subprocess.run(
+                [sys.executable, "-c", snippet],
+                cwd="/", env={"PYTHONPATH": str(repo), "PATH": os.environ.get("PATH", "")},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("ok: True", result.stdout)
+
+            self.assertTrue(target.exists(), "restore produced no database")
+            restored = sqlite3.connect(target).execute(
+                "SELECT COUNT(*) FROM leads").fetchone()[0]
+            self.assertEqual(restored, seeded)
+            self.assertIn(f"leads restored: {seeded}", result.stdout)
+
+    def test_the_old_broken_form_would_have_failed(self):
+        # Guards the fix rather than the symptom: without PYTHONPATH, from a
+        # foreign directory, the import genuinely does not resolve.
+        result = subprocess.run(
+            [sys.executable, "-c", "from wholesale_engine.backup import restore_database"],
+            cwd="/", env={"PATH": os.environ.get("PATH", "")},
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ModuleNotFoundError", result.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Audit fix 3 — restart limits where systemd actually reads them
+# ---------------------------------------------------------------------------
+
+
+class RestartLimitSection(unittest.TestCase):
+    def test_start_limits_are_in_the_unit_section(self):
+        parser = configparser.ConfigParser(strict=False, allow_no_value=True)
+        parser.optionxform = str
+        parser.read(DEPLOY / "wholesale-web.service")
+        self.assertEqual(parser["Unit"].get("StartLimitIntervalSec"), "60")
+        self.assertEqual(parser["Unit"].get("StartLimitBurst"), "5")
+        self.assertIsNone(parser["Service"].get("StartLimitIntervalSec"))
+        self.assertIsNone(parser["Service"].get("StartLimitBurst"))
+
+    def test_systemd_analyze_reports_no_unknown_keys(self):
+        if not shutil.which("systemd-analyze"):
+            self.skipTest("systemd-analyze unavailable")
+        for name in UNITS:
+            result = subprocess.run(
+                ["systemd-analyze", "verify", f"./{name}"],
+                cwd=str(DEPLOY), capture_output=True, text=True,
+            )
+            output = result.stdout + result.stderr
+            # Missing executables and tailscaled are expected off the VPS;
+            # an unknown key name never is.
+            self.assertNotIn("Unknown key name", output, f"{name}: {output}")
+            self.assertNotIn("Unknown section", output, f"{name}: {output}")
+
+
+# ---------------------------------------------------------------------------
+# Audit fix 4 — credential files are named, not blanket-chmodded
+# ---------------------------------------------------------------------------
+
+
+class CredentialPermissions(unittest.TestCase):
+    def script(self) -> str:
+        return (DEPLOY / "install.sh").read_text()
+
+    def test_the_installer_locks_down_a_checkout_env(self):
+        body = self.script()
+        self.assertIn('"$REPO_DIR/.env"', body)
+        self.assertIn("chmod 0600", body)
+
+    def test_it_does_not_blanket_chmod_the_repository(self):
+        # 0600 across the tree would make the code unreadable to the service
+        # user, which is a different outage with the same cause.
+        for line in self.script().splitlines():
+            if line.strip().startswith("#"):
+                continue
+            self.assertNotIn("chmod -R 0600", line)
+            self.assertNotIn("chmod -R 600", line)
+
+    def test_the_environment_file_permissions_are_explicit(self):
+        body = self.script()
+        self.assertIn('chown "root:$APP_USER" "$ENV_FILE"', body)
+        self.assertIn('chmod 0640 "$ENV_FILE"', body)
+
+    def test_it_never_edits_credential_contents(self):
+        # Permissions only. A guarded heredoc creates the file when absent;
+        # nothing rewrites one that exists.
+        body = self.script()
+        self.assertIn('if [ ! -f "$ENV_FILE" ]', body)
+        for line in body.splitlines():
+            if line.strip().startswith("#"):
+                continue
+            self.assertNotIn("sed -i", line)
+            self.assertNotIn('> "$REPO_DIR/.env"', line)
+
+    def test_go_w_alone_would_have_left_a_checkout_env_readable(self):
+        # The reason the explicit chmod exists: -R go-w removes write, not read.
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / ".env"
+            target.write_text("RENTCAST_API_KEY=secret\n")
+            target.chmod(0o644)
+            subprocess.run(["chmod", "-R", "go-w", tmp], check=True)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+
+
+# ---------------------------------------------------------------------------
+# Audit fix 5 — no test tooling on the production VPS
+# ---------------------------------------------------------------------------
+
+
+class ProductionDependencies(unittest.TestCase):
+    def requirements(self, name: str) -> list:
+        text = (
+            Path(__file__).resolve().parent.parent / "wholesale_engine" / name
+        ).read_text()
+        return [
+            line.split("#")[0].strip()
+            for line in text.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+
+    def test_production_installs_only_flask_and_gunicorn(self):
+        self.assertEqual(
+            self.requirements("requirements.txt"),
+            ["Flask>=3.0,<4.0", "gunicorn>=23.0,<27.0"],
+        )
+
+    def test_pytest_is_not_a_production_dependency(self):
+        for entry in self.requirements("requirements.txt"):
+            self.assertNotIn("pytest", entry)
+
+    def test_the_dev_file_exists_and_includes_production(self):
+        entries = self.requirements("requirements-dev.txt")
+        self.assertIn("-r requirements.txt", entries)
+        self.assertTrue(any("pytest" in e for e in entries))
+
+    def test_the_installer_uses_the_production_file(self):
+        body = (DEPLOY / "install.sh").read_text()
+        self.assertIn("requirements.txt", body)
+        self.assertNotIn("requirements-dev.txt", body)
+
+    def test_the_suite_needs_neither(self):
+        # unittest, standard library. Splitting the files must not have made
+        # the tests depend on something a fresh clone lacks.
+        self.assertNotIn("pytest", sys.modules)
+
+
+# ---------------------------------------------------------------------------
+# Audit fix 6 — the installer fails closed on a dangerous REPO_DIR
+# ---------------------------------------------------------------------------
+
+
+class RepoDirGuard(unittest.TestCase):
+    def run_installer(self, repo_dir):
+        env = dict(os.environ)
+        if repo_dir is None:
+            env.pop("REPO_DIR", None)
+        else:
+            env["REPO_DIR"] = repo_dir
+        # Point everything else at a path that cannot exist, so that even if a
+        # guard failed the run would stop before touching anything real.
+        env.update({"INSTALL_DIR": "/nonexistent-install",
+                    "DATA_DIR": "/nonexistent-data",
+                    "ENV_FILE": "/nonexistent/env"})
+        return subprocess.run(
+            ["bash", str(DEPLOY / "install.sh")],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+
+    def test_the_filesystem_root_is_refused(self):
+        result = self.run_installer("/")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("REFUSING TO RUN", result.stderr)
+        self.assertIn("filesystem root", result.stderr)
+
+    def test_an_empty_repo_dir_is_refused(self):
+        result = self.run_installer("")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("REPO_DIR is empty", result.stderr)
+
+    def test_a_relative_repo_dir_is_refused(self):
+        result = self.run_installer("relative/path")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("absolute path", result.stderr)
+
+    def test_system_directories_are_refused(self):
+        for candidate in ("/etc", "/usr", "/var", "/home", "/root"):
+            result = self.run_installer(candidate)
+            self.assertNotEqual(result.returncode, 0, candidate)
+            self.assertIn("system directory", result.stderr, candidate)
+
+    def test_a_directory_that_is_not_this_project_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_installer(tmp)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("not a checkout of this project", result.stderr)
+
+    def test_a_partial_checkout_is_refused(self):
+        # Looks plausible, missing the file that matters.
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "wholesale_engine").mkdir()
+            (Path(tmp) / "wholesale_engine" / "__init__.py").write_text("")
+            result = self.run_installer(tmp)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("not a checkout", result.stderr)
+
+    def test_a_traversal_in_the_path_is_refused(self):
+        result = self.run_installer("/opt/wholesale/../../etc")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("REFUSING TO RUN", result.stderr)
+
+    def test_the_guard_runs_before_any_recursive_operation(self):
+        # Compared over EXECUTED lines only. The script's own comments mention
+        # `chown -R` while explaining why the guard exists, and matching prose
+        # would make this pass or fail for the wrong reason.
+        lines = [
+            line for line in (DEPLOY / "install.sh").read_text().splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        guard = next(i for i, l in enumerate(lines) if "REFUSING TO RUN" in l)
+        recursive = next(i for i, l in enumerate(lines) if l.strip().startswith("chown -R"))
+        self.assertLess(guard, recursive, "the guard must come before the recursive chown")
+
+
+class UnitOverwriteBehaviour(unittest.TestCase):
+    def test_a_customised_unit_is_backed_up_before_being_replaced(self):
+        body = (DEPLOY / "install.sh").read_text()
+        self.assertIn("cmp -s", body)
+        self.assertIn(".bak-", body)
+
+    def test_the_behaviour_is_documented(self):
+        readme = (DEPLOY / "README.md").read_text()
+        self.assertIn("Re-running the installer", readme)
 
 
 if __name__ == "__main__":

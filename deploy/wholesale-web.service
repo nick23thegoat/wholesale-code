@@ -16,6 +16,12 @@ Wants=network-online.target
 # started anyway would create an empty database and serve a dashboard with no
 # leads on it, which looks exactly like data loss and is not.
 ConditionPathIsDirectory=/var/lib/wholesale
+# Stop looping after five failures in a minute, so a broken deploy shows up in
+# `systemctl status` instead of hiding behind an endless restart. These belong
+# in [Unit]: systemd has ignored them in [Service] since v229, with only a log
+# line to say so, which means the rate limit silently would not apply.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -34,10 +40,6 @@ ExecReload=/bin/kill -s HUP $MAINPID
 
 Restart=on-failure
 RestartSec=5s
-# Stop looping after five failures in a minute, so a broken deploy shows up in
-# `systemctl status` instead of hiding behind an endless restart.
-StartLimitIntervalSec=60
-StartLimitBurst=5
 
 StandardOutput=journal
 StandardError=journal

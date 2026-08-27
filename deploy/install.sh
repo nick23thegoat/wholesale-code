@@ -15,7 +15,9 @@ set -euo pipefail
 
 APP_USER="${APP_USER:-wholesale}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/wholesale}"
-REPO_DIR="${REPO_DIR:-$INSTALL_DIR/wholesale-code}"
+# `-` not `:-`: an explicitly empty REPO_DIR must fail the check below
+# rather than quietly becoming the default.
+REPO_DIR="${REPO_DIR-$INSTALL_DIR/wholesale-code}"
 VENV_DIR="${VENV_DIR:-$INSTALL_DIR/venv}"
 DATA_DIR="${DATA_DIR:-/var/lib/wholesale}"
 ENV_FILE="${ENV_FILE:-/etc/wholesale/env}"
@@ -23,7 +25,36 @@ ENV_FILE="${ENV_FILE:-/etc/wholesale/env}"
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 
 [ "$(id -u)" -eq 0 ] || { echo "run this with sudo" >&2; exit 1; }
-[ -d "$REPO_DIR" ] || { echo "no checkout at $REPO_DIR — clone it there first" >&2; exit 1; }
+
+# --- REPO_DIR sanity ------------------------------------------------------
+# Everything below runs `chown -R` and `chmod -R` against this path. A wrong
+# value is not a failed install, it is a damaged system, so this fails closed
+# on anything that is not recognisably a checkout of this project.
+die() { echo "REFUSING TO RUN: $*" >&2; exit 1; }
+
+[ -n "${REPO_DIR:-}" ] || die "REPO_DIR is empty."
+case "$REPO_DIR" in
+  /) die "REPO_DIR is '/'. A recursive chown against the filesystem root would break this machine." ;;
+  */..*) die "REPO_DIR contains '..': $REPO_DIR" ;;
+  /*) : ;;
+  *) die "REPO_DIR must be an absolute path, got '$REPO_DIR'." ;;
+esac
+
+# Resolve symlinks before comparing, so a link cannot point the recursive
+# operations somewhere other than where the checks looked.
+REPO_DIR="$(readlink -f -- "$REPO_DIR" 2>/dev/null || echo "$REPO_DIR")"
+[ "$REPO_DIR" != "/" ] || die "REPO_DIR resolves to '/'."
+
+for shallow in /etc /usr /var /home /root /opt /srv /boot /bin /sbin /lib /tmp; do
+  [ "$REPO_DIR" = "$shallow" ] && die "REPO_DIR is a system directory: $REPO_DIR"
+done
+
+[ -d "$REPO_DIR" ] || die "no checkout at $REPO_DIR — clone it there first."
+
+# It must actually look like this project, not merely exist.
+for required in wholesale_engine/__init__.py wholesale_engine/main.py deploy/install.sh; do
+  [ -f "$REPO_DIR/$required" ] || die "$REPO_DIR is not a checkout of this project (missing $required)."
+done
 
 say "Service user: $APP_USER"
 if id "$APP_USER" >/dev/null 2>&1; then
@@ -84,10 +115,37 @@ chown -R root:root "$REPO_DIR"
 chmod -R go-w "$REPO_DIR"
 echo "    $REPO_DIR is root-owned, not writable by $APP_USER"
 
+say "Credential files"
+# `chmod -R go-w` above removes WRITE bits and leaves READ alone, so a .env
+# created with the usual umask stays 0644 — world-readable, holding API keys.
+# Named explicitly rather than by a blanket chmod across the tree: making
+# every file 0600 would also make the code unreadable to the service user.
+# Contents are never touched.
+credentials_found=0
+for candidate in "$REPO_DIR/.env" "$REPO_DIR/.envrc"; do
+  if [ -f "$candidate" ]; then
+    chown root:root -- "$candidate"
+    chmod 0600 -- "$candidate"
+    echo "    $candidate -> 0600 root:root"
+    credentials_found=1
+  fi
+done
+[ "$credentials_found" -eq 1 ] || echo "    none in the checkout (credentials belong in $ENV_FILE)"
+
 say "systemd units"
+# A unit you edited on the box is a decision someone made deliberately, so it
+# is copied aside before being replaced rather than silently overwritten. The
+# repo version still wins — that keeps a re-run predictable — but the edit is
+# recoverable and the script says where it went.
+stamp="$(date +%Y%m%d-%H%M%S)"
 for unit in wholesale-web.service wholesale-backup.service wholesale-backup.timer \
             wholesale-hunt.service wholesale-hunt.timer; do
-  install -m 0644 "$REPO_DIR/deploy/$unit" "/etc/systemd/system/$unit"
+  target="/etc/systemd/system/$unit"
+  if [ -f "$target" ] && ! cmp -s "$REPO_DIR/deploy/$unit" "$target"; then
+    cp -p -- "$target" "$target.bak-$stamp"
+    echo "    $unit differs from the repo — saved yours to $target.bak-$stamp"
+  fi
+  install -m 0644 "$REPO_DIR/deploy/$unit" "$target"
   echo "    installed $unit"
 done
 systemctl daemon-reload

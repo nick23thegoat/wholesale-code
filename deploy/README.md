@@ -225,22 +225,56 @@ encrypt.
 
 ### Restore
 
+`wholesale_engine` is not pip-installed into the venv — the units reach it
+through their `WorkingDirectory`. A restore run by hand is not inside that
+directory, so it has to say where the code is. That is what `PYTHONPATH` below
+is for; without it you get `ModuleNotFoundError` at the worst possible moment.
+
+**First, dry-run it into a scratch file.** This touches nothing real:
+
+```bash
+sudo -u wholesale \
+  PYTHONPATH=/opt/wholesale/wholesale-code \
+  /opt/wholesale/venv/bin/python -c '
+from pathlib import Path
+from wholesale_engine.backup import restore_database
+archive = sorted(Path("/var/lib/wholesale/backups").glob("*.zip"))[-1]
+target = Path("/tmp/restore-check.db")
+print("archive:", archive)
+print("ok:", restore_database(archive, target))
+import sqlite3
+print("leads restored:", sqlite3.connect(target).execute(
+    "SELECT COUNT(*) FROM leads").fetchone()[0])
+'
+```
+
+If that prints a lead count you recognise, the archive is good.
+
+**Then the real restore.** It replaces the live database, so the service stops
+first and the current file is kept aside:
+
 ```bash
 sudo systemctl stop wholesale-web
 
-sudo -u wholesale /opt/wholesale/venv/bin/python - <<'PY'
+sudo -u wholesale cp -p /var/lib/wholesale/leads.db \
+                        /var/lib/wholesale/leads.db.before-restore
+
+sudo -u wholesale \
+  PYTHONPATH=/opt/wholesale/wholesale-code \
+  /opt/wholesale/venv/bin/python -c '
 from pathlib import Path
 from wholesale_engine.backup import restore_database
 archive = sorted(Path("/var/lib/wholesale/backups").glob("*.zip"))[-1]
 print("restoring", archive)
 print("ok:", restore_database(archive, Path("/var/lib/wholesale/leads.db")))
-PY
+'
 
 sudo systemctl start wholesale-web
+curl -s http://127.0.0.1:8000/healthz
 ```
 
-Test a restore into a scratch path *before* you need one. A backup you have
-never restored is a hope, not a backup.
+Do the dry run *before* you need it. A backup you have never restored is a
+hope, not a backup.
 
 ---
 
@@ -257,6 +291,22 @@ systemctl list-timers 'wholesale-*'
 
 Health check: `curl -s http://127.0.0.1:8000/healthz` — touches no database, so
 it stays honest about the process rather than about the data.
+
+### Re-running the installer
+
+`deploy/install.sh` is safe to re-run: the service user, the virtualenv and
+`/etc/wholesale/env` are all created only if absent, and nothing it does
+touches the database.
+
+**Unit files are the exception, deliberately.** The repo version always wins,
+so a re-run gives you a predictable, known state. If a unit on the box differs
+from the repo's, yours is copied to `<unit>.bak-<timestamp>` first and the
+script says so — the edit is recoverable, but it is not kept. If you want a
+permanent local change, use a drop-in instead, which a re-run never touches:
+
+```bash
+sudo systemctl edit wholesale-web        # writes /etc/systemd/system/wholesale-web.service.d/override.conf
+```
 
 ### Updating
 

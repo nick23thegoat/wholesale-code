@@ -21,10 +21,13 @@ Flask>=3.0,<4.0
 # the dashboard — see deploy/README.md.
 gunicorn>=23.0,<27.0
 
-# Optional development tooling:
-pytest>=7.0          # nicer test runner; `python -m unittest` works without it
-# mypy>=1.0          # static type checking
-# ruff>=0.1          # linting / formatting
+# Development and test tooling is NOT here. A production VPS installs this
+# file, and a test runner on a server is a package that does not need to
+# exist. See requirements-dev.txt.
+#
+# Nothing in that file is needed to run the tests: the suite is unittest and
+#     python3 -m unittest discover -s tests
+# works against the standard library alone.
 #
 # Reserved for V2 integrations (property data, comps, county records, CRM).
 # Deliberately NOT installed yet — V1 has no external data access by design.

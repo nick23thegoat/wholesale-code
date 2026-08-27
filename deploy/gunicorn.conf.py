@@ -17,10 +17,22 @@ safe; a large worker count would just multiply idle processes on a small VPS.
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 
-#: Loopback only. Changing this is a security decision, not a tuning one —
-#: read deploy/README.md before you touch it.
-bind = os.environ.get("WEB_BIND", "127.0.0.1:8000")
+# gunicorn execs this file before the application is importable, so put the
+# checkout on the path ourselves rather than relying on the working directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from wholesale_engine.web.bind import validate_bind  # noqa: E402
+
+#: Loopback only. Changing this is a security decision, not a tuning one.
+#:
+#: WEB_BIND is honoured so a unix socket or a different port stays possible,
+#: but it is VALIDATED and fails closed: a non-loopback value raises here,
+#: gunicorn never starts, and systemd reports why. An environment file that
+#: says 0.0.0.0 must not quietly put owner records on the internet.
+bind = validate_bind(os.environ.get("WEB_BIND", "127.0.0.1:8000"))
 
 workers = int(os.environ.get("WEB_WORKERS", "2"))
 threads = int(os.environ.get("WEB_THREADS", "4"))
