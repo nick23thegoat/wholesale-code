@@ -35,7 +35,7 @@ operations under one connection.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence
 
 from ..budget import ApiBudget
 from ..buybox import BuyBox, config_path as buybox_config_path
@@ -68,6 +68,9 @@ from .models import (
     SaveResult,
 )
 from .paths import DEFAULT_OUTPUT_DIR, SAMPLE_LEAD_COMPS, SAMPLE_LEADS
+
+if TYPE_CHECKING:  # imported lazily at runtime, so the acquisitions stack
+    from ..acquisitions.models import Buyer  # is not loaded for a plain hunt
 
 #: A callback for progress messages. The CLI prints them; a web request
 #: collects them. Default is silence, which is what a library should do.
@@ -484,6 +487,53 @@ class EngineService:
         store, should_close = self._open_store()
         try:
             return store.recent_activity(limit)
+        finally:
+            if should_close:
+                store.close()
+
+    # ------------------------------------------------------------------
+    # Buyers
+    # ------------------------------------------------------------------
+
+    def matching_buyers_for_property(self, row: StoredLead) -> List["Buyer"]:
+        """End buyers whose buy box fits this property.
+
+        Delegates entirely to :meth:`AcquisitionStore.matching_buyers`, which
+        delegates to :meth:`Buyer.matches`. No rule is evaluated here and none
+        is duplicated: this method exists so a web route and the deal room can
+        both ask the question without either one reaching for the database.
+
+        The price passed is ``recommended_offer``, which is what the existing
+        caller in ``automation/daily_priority`` passes. Matching semantics are
+        deliberately not changed by surfacing them somewhere new.
+
+        A property with no recommended offer yet still matches on state and
+        type — :meth:`Buyer.matches` treats an unknown attribute as "does not
+        rule anyone out", because the point is to shortlist people to call,
+        not to filter them away on a blank field.
+        """
+        from ..acquisitions.store import AcquisitionStore
+
+        if row is None:
+            return []
+        store, should_close = self._open_store()
+        try:
+            return AcquisitionStore(store).matching_buyers(
+                state=row.state or "",
+                property_type=row.property_type or "",
+                price=row.recommended_offer,
+            )
+        finally:
+            if should_close:
+                store.close()
+
+    def all_buyers(self) -> List["Buyer"]:
+        """Every buyer on file, for "no matches — is anyone on file at all?"."""
+        from ..acquisitions.store import AcquisitionStore
+
+        store, should_close = self._open_store()
+        try:
+            return AcquisitionStore(store).all_buyers()
         finally:
             if should_close:
                 store.close()

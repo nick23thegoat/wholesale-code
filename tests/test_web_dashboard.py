@@ -208,12 +208,39 @@ class ShownValuesMatchStoredValues(Seeded):
             self.assertGreater(counts.get(key, 0), 0, key)
             self.assertIn(str(counts[key]), body)
 
+    def test_equity_percentage_is_rendered_as_a_ratio_not_as_a_bare_number(self):
+        # equity_percentage is stored 0.0-1.0. Formatting it directly showed
+        # 68% equity as "1%", which understates a high-equity lead a hundred
+        # times over — the kind of number someone passes on a deal over.
+        from wholesale_engine.web.formatting import ratio
+
+        row = next(
+            r for r in self.service.search_leads(SearchQuery())
+            if r.equity_percentage
+        )
+        self.assertLessEqual(row.equity_percentage, 1.0)
+        body = self.html(f"/leads/{row.dedupe_key}")
+        self.assertIn(ratio(row.equity_percentage), body)
+        self.assertEqual(ratio(0.6767), "68%")
+        self.assertEqual(ratio(None), "—")
+
+    def test_the_web_and_the_deal_room_agree_on_equity(self):
+        from wholesale_engine.web.formatting import ratio
+
+        row = next(
+            r for r in self.service.search_leads(SearchQuery())
+            if r.equity_percentage
+        )
+        deal_room = f"{row.equity_percentage * 100:.0f}%"
+        self.assertEqual(ratio(row.equity_percentage), deal_room)
+
     def test_an_unknown_number_renders_as_a_dash_not_as_zero(self):
         # A blank ARV shown as $0 reads as a worthless property rather than an
         # unvalued one, which is the difference between passing and not calling.
         self.assertEqual(money(None), "—")
         self.assertEqual(score(None), "—")
         self.assertEqual(percent(None), "—")
+        self.assertEqual(percent(68), "68%")   # already out of a hundred
         self.assertEqual(text(""), "—")
         self.assertEqual(money(0), "$0")
         self.assertEqual(score(0), "0")

@@ -166,6 +166,10 @@ def create_app(
             "property.html",
             row=row,
             decisions=engine().decisions_for_property(row.dedupe_key),
+            # Asked through the service, which delegates to the same
+            # Buyer.matches the CLI and the daily priority list use.
+            buyers=engine().matching_buyers_for_property(row),
+            any_buyers_on_file=bool(engine().all_buyers()),
         )
 
     # ------------------------------------------------------------------

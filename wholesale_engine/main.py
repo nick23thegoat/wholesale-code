@@ -1516,6 +1516,14 @@ def _render_deal_room(
             offers=acquisitions.offers_for(row.dedupe_key),
             contract=acquisitions.contract_for(row.dedupe_key),
             assignment=acquisitions.assignment_for(row.dedupe_key),
+            # A shortlist to call, from the existing buyer list. Passing a
+            # list (even an empty one) is what makes the deal room show the
+            # section at all; other callers pass nothing and are unchanged.
+            matching_buyers=acquisitions.matching_buyers(
+                state=row.state,
+                property_type=row.property_type,
+                price=row.recommended_offer,
+            ),
             research=research,
             priority=priority,
             acquisition_priority=acquisition_priority,

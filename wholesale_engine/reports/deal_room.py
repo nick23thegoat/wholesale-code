@@ -12,11 +12,13 @@ from typing import List, Optional, Sequence
 
 from ..acquisitions import (
     Assignment,
+    Buyer,
     Contact,
     Contract,
     Offer,
     OutreachActivity,
     describe_status,
+    format_phone,
 )
 from ..acquisitions.contact_priority import ContactPriority
 from ..config import DEFAULT_CONFIG, EngineConfig
@@ -37,6 +39,55 @@ def _pct(value: Optional[float]) -> str:
     return "—" if value is None else f"{value * 100:.0f}%"
 
 
+def _matching_buyers(row: StoredLead, buyers: Sequence[Buyer]) -> List[str]:
+    """Buyers on file whose buy box fits this property.
+
+    A shortlist of people to call, not an assignment. Nothing here changes any
+    record: matching is a question asked of the buyer list, and the answer is
+    printed. Assigning is still a deliberate ``--assign``.
+    """
+    lines = ["", "  MATCHING BUYERS", "  " + "-" * (WIDTH - 2)]
+    if not buyers:
+        lines.append(
+            _wrap(
+                "No buyer on file matches this property. That is an answer, not "
+                "an error — add buyers with --add-buyer, or widen an existing "
+                "buy box.",
+                indent="    ",
+            )
+        )
+        return lines
+
+    lines.append(
+        _wrap(
+            f"{len(buyers)} buyer(s) match on state, property type and "
+            f"{money(row.recommended_offer)}. Matching does not assign "
+            "anything — use --assign when you have agreed one.",
+            indent="    ",
+        )
+    )
+    lines.append("")
+    for buyer in buyers:
+        title = buyer.name or "unnamed buyer"
+        if buyer.company:
+            title = f"{title} — {buyer.company}"
+        if getattr(buyer, "is_test_data", False):
+            title = f"{title}   [TEST DATA]"
+        lines.append(f"    {title}")
+        detail = [f"price {buyer.price_range()}"]
+        if buyer.preferred_states:
+            detail.append("states " + ", ".join(buyer.preferred_states))
+        if buyer.property_types:
+            detail.append("types " + ", ".join(buyer.property_types))
+        if buyer.market:
+            detail.append(f"market {buyer.market}")
+        lines.append(_wrap(" · ".join(detail), indent="      "))
+        contact = [c for c in (format_phone(buyer.phone), buyer.email) if c]
+        if contact:
+            lines.append(_wrap(" · ".join(contact), indent="      "))
+    return lines
+
+
 def render_deal_room(
     row: StoredLead,
     contact: Optional[Contact] = None,
@@ -44,6 +95,7 @@ def render_deal_room(
     offers: Optional[Sequence[Offer]] = None,
     contract: Optional[Contract] = None,
     assignment: Optional[Assignment] = None,
+    matching_buyers: Optional[Sequence[Buyer]] = None,
     research: Optional[PropertyResearch] = None,
     priority: Optional[PriorityScore] = None,
     acquisition_priority: Optional[ContactPriority] = None,
@@ -359,6 +411,11 @@ def render_deal_room(
         )
     else:
         lines.append(_wrap("No buyer process started.", indent="  "))
+
+    # ``None`` means nobody looked; an empty list means somebody looked and
+    # found none. Those are different answers and the screen says which.
+    if matching_buyers is not None:
+        lines += _matching_buyers(row, matching_buyers)
 
     # --- RISK / GAPS -----------------------------------------------------
     lines += _section("RISK FLAGS")

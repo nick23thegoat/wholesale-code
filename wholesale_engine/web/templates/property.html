@@ -35,7 +35,7 @@
   <h2>Equity</h2>
   <dl class="grid">
     <div><dt>Amount</dt><dd>{{ row.equity_amount|money }}</dd></div>
-    <div><dt>Percentage</dt><dd>{{ row.equity_percentage|percent }}</dd></div>
+    <div><dt>Percentage</dt><dd>{{ row.equity_percentage|ratio }}</dd></div>
     <div class="wide"><dt>Status</dt><dd>{{ row.equity_status|text }}</dd></div>
     <div><dt>Estimated value</dt><dd>{{ row.estimated_value|money }}</dd></div>
     <div><dt>Estimated equity</dt><dd>{{ row.estimated_equity|money }}</dd></div>
@@ -77,6 +77,45 @@
   <p class="note">Unknown is a gap to fill, not a no. It never scores and never rejects.</p>
 </section>
 {% endif %}
+
+<section>
+  <h2>Matching buyers</h2>
+  {% if buyers %}
+    <p class="note">{{ buyers|length }} matching buyer{{ '' if buyers|length == 1 else 's' }}
+      on file, by state, property type and the recommended offer of
+      {{ row.recommended_offer|money }}. A shortlist to call — nothing is
+      assigned.</p>
+    <ul class="buyers">
+    {% for b in buyers %}
+      <li>
+        <p class="who">{{ b.name|text }}{% if b.company %} <span class="co">{{ b.company }}</span>{% endif %}
+          {%- if b.is_test_data %} <span class="pill review">TEST DATA</span>{% endif %}</p>
+        <p class="terms">{{ b.price_range() }}
+          {%- if b.preferred_states %} · {{ b.preferred_states|join(', ') }}{% endif %}
+          {%- if b.property_types %} · {{ b.property_types|join(', ') }}{% endif %}
+          {%- if b.market %} · {{ b.market }}{% endif %}</p>
+        {% if b.phone or b.email %}
+        <p class="reach">
+          {%- if b.phone %}<a href="tel:{{ b.phone }}">{{ b.phone|phone }}</a>{% endif %}
+          {%- if b.phone and b.email %} · {% endif %}
+          {%- if b.email %}<a href="mailto:{{ b.email }}">{{ b.email }}</a>{% endif %}
+        </p>
+        {% endif %}
+      </li>
+    {% endfor %}
+    </ul>
+  {% else %}
+    <p class="empty">
+      {% if any_buyers_on_file %}
+        No buyer on file matches this property. That is an answer, not an error
+        — the buyers you have want a different state, type or price.
+      {% else %}
+        No buyers on file yet. Add them with
+        <code>--add-buyer</code> and matches will appear here.
+      {% endif %}
+    </p>
+  {% endif %}
+</section>
 
 <section>
   <h2>Decision history</h2>

@@ -184,3 +184,16 @@ button, .btn {
 .decisions .reason { font-weight: 600; margin: .3rem 0 .1rem; }
 .decisions .detail { color: var(--muted); font-size: .85rem; margin: 0; }
 .decisions .ts { color: var(--muted); font-size: .72rem; margin: .3rem 0 0; }
+
+/* ---- matching buyers: a call list, so the phone number is the target --- */
+
+.buyers { list-style: none; margin: .5rem 0 0; padding: 0; display: grid; gap: .6rem; }
+.buyers li { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: .6rem .7rem; }
+.buyers .who { margin: 0; font-weight: 650; }
+.buyers .co { color: var(--muted); font-weight: 400; }
+.buyers .terms { margin: .15rem 0 0; color: var(--muted); font-size: .82rem; }
+.buyers .reach { margin: .35rem 0 0; display: flex; flex-wrap: wrap; gap: .5rem; }
+.buyers .reach a {
+  min-height: var(--tap); display: inline-flex; align-items: center;
+  color: var(--accent); text-decoration: none; font-weight: 600; font-size: .9rem;
+}

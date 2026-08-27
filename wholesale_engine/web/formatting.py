@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from ..acquisitions.models import format_phone as _format_phone
 from ..formatting import money as _money
 
 #: What an unknown looks like. Short, because it appears in narrow columns.
@@ -25,6 +26,15 @@ def money(value: Optional[float]) -> str:
     return DASH if value is None else _money(value)
 
 
+def phone(value: Any) -> str:
+    """A phone number the way the reports already print it, or a dash.
+
+    Formatting only — the digits are whatever was stored, and nothing here
+    invents or corrects a number.
+    """
+    return _format_phone(value) or DASH
+
+
 def score(value: Optional[float]) -> str:
     """A score to one decimal, or a dash. Zero is a real score and shows as 0."""
     return DASH if value is None else f"{value:.0f}"
@@ -34,7 +44,20 @@ def number(value: Optional[float]) -> str:
     return DASH if value is None else f"{value:,.0f}"
 
 
+def ratio(value: Optional[float]) -> str:
+    """A 0.0-1.0 ratio as a percentage, matching every other renderer.
+
+    ``equity_percentage`` is stored as a fraction of value, not as a number
+    out of a hundred — ``equity.py`` documents it as 0.0-1.0 and the deal room
+    multiplies before printing. Formatting it directly showed 68% equity as
+    "1%", which understates a high-equity lead by a hundred times and is
+    exactly the kind of number someone passes on a good deal over.
+    """
+    return DASH if value is None else f"{value * 100:.0f}%"
+
+
 def percent(value: Optional[float]) -> str:
+    """A value that is ALREADY out of a hundred. Not for stored ratios."""
     return DASH if value is None else f"{value:.0f}%"
 
 
@@ -84,9 +107,11 @@ def status_class(status: Any) -> str:
 #: Registered onto the Jinja environment by ``create_app``.
 FILTERS = {
     "money": money,
+    "phone": phone,
     "score": score,
     "number": number,
     "percent": percent,
+    "ratio": ratio,
     "text": text,
     "when": when,
     "band_class": band_class,
