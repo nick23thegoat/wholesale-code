@@ -1,0 +1,13 @@
+# Development and test tooling. NOT installed on the VPS.
+#
+#     pip install -r wholesale_engine/requirements-dev.txt
+#
+# The test suite does not need any of it. It is unittest, and
+#     python3 -m unittest discover -s tests
+# runs the whole thing on the standard library. These are conveniences.
+
+-r requirements.txt
+
+pytest>=7.0          # nicer test runner and output
+# mypy>=1.0          # static type checking
+# ruff>=0.1          # linting / formatting

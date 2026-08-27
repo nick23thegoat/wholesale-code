@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Runs{% endblock %}
+{% block body %}
+<h1>Runs</h1>
+{% if not history %}
+  <p class="empty">No runs recorded. Recording is opt-in — a hunt writes a run
+    row when it is asked to.</p>
+{% endif %}
+<ul class="cards">
+{% for run in history %}
+  {% set c = counts.get(run.run_id, {}) %}
+  <li>
+    <a class="card" href="{{ url_for('run_detail', run_id=run.run_id) }}">
+      <div class="card-top">
+        <span class="addr">Run {{ run.run_id }}</span>
+        <span class="band {{ run.status|status_class }}">{{ run.status }}</span>
+      </div>
+      <p class="sub">{{ run.started_at|when }} · {{ run.trigger }} · {{ run.provider|text }} · {{ run.mode }}</p>
+      <dl class="grid">
+        <div><dt>Seen</dt><dd>{{ run.leads_seen }}</dd></div>
+        <div><dt>Accepted</dt><dd>{{ c.get(accepted, 0) }}</dd></div>
+        <div><dt>Rejected</dt><dd>{{ c.get(rejected, 0) }}</dd></div>
+        <div><dt>Incomplete</dt><dd>{{ c.get(incomplete, 0) }}</dd></div>
+        <div><dt>API requests</dt><dd>{{ run.api_requests_spent }}</dd></div>
+        <div><dt>Cache hits</dt><dd>{{ run.cache_hits }}</dd></div>
+      </dl>
+      {% if run.error %}<p class="err">{{ run.error }}</p>{% endif %}
+    </a>
+  </li>
+{% endfor %}
+</ul>
+{% endblock %}

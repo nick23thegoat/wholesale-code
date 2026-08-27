@@ -1,0 +1,31 @@
+# One scheduled hunt. This is the ONLY unit that costs money: it makes live
+# provider requests against the monthly quota.
+[Unit]
+Description=Wholesale lead hunt (scheduled)
+Documentation=file:/opt/wholesale/wholesale-code/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+ConditionPathIsDirectory=/var/lib/wholesale
+
+[Service]
+Type=oneshot
+User=wholesale
+Group=wholesale
+WorkingDirectory=/opt/wholesale/wholesale-code
+EnvironmentFile=/etc/wholesale/env
+
+# --buybox runs the saved buy box. There is no TTY here, so every confirmation
+# prompt declines by default and nobody is skip-traced without being asked for.
+ExecStart=/opt/wholesale/venv/bin/python -m wholesale_engine.main \
+    --hunt --buybox --quiet
+
+TimeoutStartSec=30min
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wholesale-hunt
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/wholesale

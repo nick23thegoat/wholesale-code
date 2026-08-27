@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Buy box{% endblock %}
+{% block body %}
+<h1>Buy box</h1>
+<p class="sub">{{ box.name|text }}{% if not view.exists %} · using defaults, no file saved{% endif %}</p>
+<p class="path">{{ view.path }}</p>
+
+{% if view.warnings %}
+<section class="warn">
+  <h2>Warnings</h2>
+  <ul>{% for w in view.warnings %}<li>{{ w }}</li>{% endfor %}</ul>
+</section>
+{% endif %}
+
+<section class="group active">
+  <h2>Active — currently filtering leads</h2>
+  <p class="note">These reach <code>HuntCriteria</code> and the funnel applies them.</p>
+  <dl class="grid">
+  {% for f in applied %}
+    <div class="wide">
+      <dt>{{ f.name.replace('_',' ') }}</dt>
+      <dd>{% if f.value is none or f.value == [] %}<span class="off">no constraint</span>
+          {%- elif f.value is string %}{{ f.value }}
+          {%- elif f.value is number %}{{ f.value|number }}
+          {%- else %}{{ f.value|join(', ') }}{% endif %}</dd>
+    </div>
+  {% endfor %}
+  </dl>
+</section>
+
+<section class="group inert">
+  <h2>Saved but NOT filtering</h2>
+  <p class="note big">Every value below is stored and <strong>ignored</strong>.
+    Setting one changes nothing about which leads you see.</p>
+
+  <h3>No filter exists yet</h3>
+  <p class="note">The engine has nowhere to apply these. They will start
+    working when the filters are built.</p>
+  <dl class="grid">
+  {% for f in not_implemented %}
+    <div class="wide {{ 'flagged' if f.set }}">
+      <dt>{{ f.name.replace('_',' ') }}</dt>
+      <dd>{% if f.value is none %}<span class="off">not set</span>
+          {%- else %}<span class="ignored">{{ f.value|number }} — ignored</span>{% endif %}</dd>
+    </div>
+  {% endfor %}
+  </dl>
+
+  <h3>Honoured by the engine, but not from here</h3>
+  <p class="note">The engine does use these — from its own configuration, not
+    from the buy box. Changing them here does not change a hunt.</p>
+  <dl class="grid">
+  {% for f in not_routed %}
+    <div class="wide {{ 'flagged' if f.set }}">
+      <dt>{{ f.name.replace('_',' ') }}</dt>
+      <dd>{% if f.value is none %}<span class="off">not set</span>
+          {%- else %}<span class="ignored">{{ f.value|number }} — ignored here</span>{% endif %}</dd>
+    </div>
+  {% endfor %}
+  </dl>
+</section>
+
+<section class="group">
+  <h2>Description</h2>
+  <dl class="grid">
+  {% for f in descriptive %}
+    <div class="wide"><dt>{{ f.name }}</dt><dd>{{ f.value|text }}</dd></div>
+  {% endfor %}
+  </dl>
+</section>
+
+<p class="note">Searches this buy box would cost: <strong>{{ view.search_count }}</strong>
+  API request{{ '' if view.search_count == 1 else 's' }} per run.</p>
+{% endblock %}

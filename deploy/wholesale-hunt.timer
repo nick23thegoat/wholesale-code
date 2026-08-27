@@ -1,0 +1,13 @@
+# The weekly hunt. Separate from the dashboard on purpose: the dashboard only
+# ever reads, and this is the one thing that spends the monthly API budget.
+[Unit]
+Description=Weekly wholesale lead hunt
+
+[Timer]
+OnCalendar=Mon *-*-* 07:00:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=wholesale-hunt.service
+
+[Install]
+WantedBy=timers.target
