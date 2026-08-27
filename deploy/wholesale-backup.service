@@ -1,0 +1,27 @@
+# One backup run. Driven by wholesale-backup.timer, not enabled on its own.
+[Unit]
+Description=Back up the wholesale lead database
+Documentation=file:/opt/wholesale/wholesale-code/deploy/README.md
+ConditionPathExists=/var/lib/wholesale/leads.db
+
+[Service]
+Type=oneshot
+User=wholesale
+Group=wholesale
+WorkingDirectory=/opt/wholesale/wholesale-code
+EnvironmentFile=/etc/wholesale/env
+
+# --include-secrets is deliberately absent: .env stays out of every scheduled
+# archive. Including it is a thing a person does once, by hand, knowing why.
+ExecStart=/opt/wholesale/venv/bin/python -m wholesale_engine.main \
+    --backup --backup-dir /var/lib/wholesale/backups --quiet
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wholesale-backup
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/wholesale

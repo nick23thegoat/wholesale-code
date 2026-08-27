@@ -132,12 +132,32 @@ Nothing about scheduling changes the manual commands. `--dashboard`,
 `--contact-queue`, `--deal-room` and the rest work exactly the same whether or
 not a schedule exists, and you can always run `--daily` by hand.
 
-## This is deliberately not a cloud service
+## Running it on a server
 
-No server, no hosted queue, no account. The engine is a local program with a
-local SQLite database, and a scheduler you control. That means your property
-data and your credentials stay on your machine — and that a backup is your
-responsibility:
+Since this was first written the engine has grown a VPS deployment: systemd
+timers instead of cron, a read-only web dashboard, and Tailscale as the way in
+from a phone. The cron recipes above still work and are still the right answer
+for a laptop — but on a server, prefer the units in `deploy/`, which handle
+restart-on-failure, log to journald and cannot silently miss a run:
+
+```bash
+systemctl list-timers 'wholesale-*'
+sudo journalctl -u wholesale-hunt -n 200
+```
+
+Full instructions are in [`deploy/README.md`](deploy/README.md).
+
+**What has not changed:** there is still no hosted service, no account and no
+third party holding your data. A VPS you rent and control is still your
+machine — the database is a SQLite file on it, the credentials are in a 0640
+file on it, and nothing is shared with anyone. What *has* changed is that the
+machine is now always on, which is what makes a weekly schedule and a phone
+dashboard possible.
+
+**What that costs you:** a server on the internet is a server on the internet.
+The dashboard has no login and is private only because it binds loopback and
+Tailscale carries it to your phone. Read the security section of
+[`deploy/README.md`](deploy/README.md) before you expose anything, and back up:
 
 ```bash
 python3 -m wholesale_engine.main --backup

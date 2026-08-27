@@ -16,6 +16,11 @@
 # Tested against 3.1.3.
 Flask>=3.0,<4.0
 
+# Production WSGI server for the VPS deployment. Pure Python, no build
+# toolchain. Flask's own server is for development only and must not serve
+# the dashboard — see deploy/README.md.
+gunicorn>=23.0,<27.0
+
 # Optional development tooling:
 pytest>=7.0          # nicer test runner; `python -m unittest` works without it
 # mypy>=1.0          # static type checking

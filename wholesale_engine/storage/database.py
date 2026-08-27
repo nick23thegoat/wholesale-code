@@ -114,7 +114,11 @@ ACTIVITY_TYPES = (
     ACTIVITY_NOTIFICATION,
 )
 
-DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "leads.db"
+from ..paths import database_path as _database_path
+
+#: Resolved at import from :mod:`wholesale_engine.paths`, so a deployment
+#: can move the data directory without the working directory mattering.
+DEFAULT_DB_PATH = _database_path()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS properties (

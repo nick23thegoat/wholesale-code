@@ -21,6 +21,7 @@ from typing import Dict, List, Optional
 #: The environment variables the engine reads. Mirrored in ``.env.example``.
 ENV_VARS = (
     "WHOLESALE_MODE",
+    "WHOLESALE_DATA_DIR",
     "DATA_PROVIDER",
     "COMPS_PROVIDER",
     "SKIP_TRACE_PROVIDER",

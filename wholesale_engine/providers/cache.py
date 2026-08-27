@@ -31,7 +31,9 @@ from typing import Any, Dict, Optional
 
 #: Where cached responses live. Git-ignored: it is machine-local, and it
 #: contains real property data pulled under your account.
-DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
+from ..paths import cache_dir as _cache_dir
+
+DEFAULT_CACHE_DIR = _cache_dir()
 
 #: Parameter names dropped before the key is hashed. Belt and braces: no
 #: adapter should be putting a key in a query parameter, and if one ever does,

@@ -1,0 +1,64 @@
+# The read-only dashboard, served by gunicorn on the loopback interface.
+#
+# Install:  sudo cp deploy/wholesale-web.service /etc/systemd/system/
+#           sudo systemctl daemon-reload && sudo systemctl enable --now wholesale-web
+#
+# It listens on 127.0.0.1 ONLY. Tailscale publishes it onto the tailnet; see
+# deploy/README.md. Do not widen the bind to reach it from your phone — that is
+# what `tailscale serve` is for, and this application has no authentication.
+
+[Unit]
+Description=Wholesale acquisition dashboard (read-only)
+Documentation=file:/opt/wholesale/wholesale-code/deploy/README.md
+After=network-online.target tailscaled.service
+Wants=network-online.target
+# Do not start against a data directory that is not there yet. A service that
+# started anyway would create an empty database and serve a dashboard with no
+# leads on it, which looks exactly like data loss and is not.
+ConditionPathIsDirectory=/var/lib/wholesale
+
+[Service]
+Type=simple
+User=wholesale
+Group=wholesale
+WorkingDirectory=/opt/wholesale/wholesale-code
+
+# Secrets live in a 0600 file, never in this unit. systemd does not read a
+# login shell, so this is the only thing that puts them in the process.
+EnvironmentFile=/etc/wholesale/env
+
+ExecStart=/opt/wholesale/venv/bin/gunicorn \
+    --config /opt/wholesale/wholesale-code/deploy/gunicorn.conf.py \
+    deploy.wsgi:application
+ExecReload=/bin/kill -s HUP $MAINPID
+
+Restart=on-failure
+RestartSec=5s
+# Stop looping after five failures in a minute, so a broken deploy shows up in
+# `systemctl status` instead of hiding behind an endless restart.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wholesale-web
+
+# --- hardening -------------------------------------------------------------
+# This process reads property and owner records. It needs one directory.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ReadWritePaths=/var/lib/wholesale
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+
+[Install]
+WantedBy=multi-user.target

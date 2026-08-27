@@ -41,7 +41,9 @@ from .config import (
 from .providers.criteria import HuntCriteria
 
 #: Where the buy box lives. Outside the package on purpose.
-DEFAULT_PATH = Path(__file__).resolve().parent.parent / "config" / "buybox.json"
+from .paths import config_dir as _config_dir
+
+DEFAULT_PATH = _config_dir() / "buybox.json"
 PATH_VAR = "BUYBOX_PATH"
 
 #: Property types the analyzer can underwrite. Land and commercial are absent

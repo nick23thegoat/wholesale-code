@@ -31,7 +31,9 @@ from pathlib import Path
 from typing import Dict, Optional
 
 #: Where the ledger is kept. Git-ignored — it is machine-local state.
-DEFAULT_LEDGER = Path(__file__).resolve().parent.parent / "data" / "api_usage.json"
+from ..paths import ledger_path as _ledger_path
+
+DEFAULT_LEDGER = _ledger_path()
 
 #: Environment overrides, per provider slot.
 LIMIT_VARS = {"rentcast": "MAX_RENTCAST"}

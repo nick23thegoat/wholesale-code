@@ -1,0 +1,14 @@
+# Nightly backup, with a randomised delay so it does not collide with whatever
+# else on the box also thought 3am was a good idea.
+[Unit]
+Description=Nightly wholesale database backup
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=30m
+# A VPS that was off at 3am should still back up when it comes back.
+Persistent=true
+Unit=wholesale-backup.service
+
+[Install]
+WantedBy=timers.target
